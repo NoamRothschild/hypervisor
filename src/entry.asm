@@ -3,6 +3,8 @@ section .bss.boot nobits alloc
 ENTRY_COUNT equ 512
 ENTRY_BYTE_SIZE equ 8
 
+global PML4T
+
 PML4T: resq ENTRY_COUNT
 PDPT: resq ENTRY_COUNT
 PDT: resq ENTRY_COUNT
@@ -151,4 +153,6 @@ realm64:
   mov es, ax
   mov ss, ax
 
-  jmp realMode64
+  call realMode64
+  l: hlt
+  jmp l

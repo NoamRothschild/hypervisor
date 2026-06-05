@@ -12,18 +12,11 @@ pub const MultiBootHeaderV2 = extern struct {
 export const multiboot_header: MultiBootHeaderV2 align(4) linksection(".multiboot") = .{};
 
 /// gets called at the end of entry.asm
-export fn realMode64() linksection(".text.boot") callconv(.naked) void {
+export fn realMode64() linksection(".text.boot") callconv(.C) void {
     // TODO: set up paging properly.
     //  use the externed symbols from the linker.ld file like kernel_physical_start, kernel_physical_end
-    asm volatile (
-        \\ mov $0x144, %eax
-        \\ mov $0x144, %eax
-        \\ mov $0x144, %rax
-        \\ mov $0x144, %eax
-        \\ mov $0x144, %eax
-        \\ mov $0x144, %eax
-        \\ mov $0x144, %rax
-    );
+
+    @import("paging.zig").init();
 }
 
 // var PML4T: [512]u64 align(0x1000) = [_]u64{0} ** 512;

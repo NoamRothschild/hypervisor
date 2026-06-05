@@ -1,5 +1,6 @@
 comptime {
     _ = @import("entry.zig");
+    _ = @import("paging.zig");
 }
 
 export fn kmain() void {
