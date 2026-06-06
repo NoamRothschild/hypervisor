@@ -150,6 +150,9 @@ pub fn init() linksection(".text.boot") void {
 
 /// allocates and returns an aligned virtual addr of a free 2MiB page.
 ///  virtual addr lives inside the higher half mapping
+///
+/// TODO: move page allocation into a different pml4e / pdpte,
+/// use a StaticBitSet instead of the last allocated mechanism
 pub fn alloc_page() !u64 {
     if (last_allocated_kernel_directory_page + 1 >= kernelPD.len)
         return error.PageDirectoryFull;
