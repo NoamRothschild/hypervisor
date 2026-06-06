@@ -1,9 +1,13 @@
+const debug = @import("debug.zig");
+
 comptime {
     _ = @import("entry.zig");
     _ = @import("paging.zig");
 }
 
 pub export fn kmain() void {
+    debug.printf("inside kmain!", .{});
+
     asm volatile (
         \\ mov $0x144, %eax
         \\ mov $0x144, %eax

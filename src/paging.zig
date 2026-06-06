@@ -91,6 +91,10 @@ var kernelPDPT: [512]PDPTE align(0x1000) linksection(".bss.boot") = undefined;
 var kernelPD: [512]PDE align(0x1000) linksection(".bss.boot") = undefined;
 
 pub fn init() linksection(".text.boot") void {
+    // if an integer overflow happens here, calling @panic would just cause a page fault because the page did not get created
+    // it is best to disable it here.
+    @setRuntimeSafety(false);
+
     // setting up kernel tables
     for (&kernelPDPT) |*e|
         e.* = @bitCast(@as(u64, 0));
