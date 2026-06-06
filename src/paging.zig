@@ -80,6 +80,21 @@ pub const PDE = packed struct(u64) {
     avl2: u7 = 0,
     pk: u4,
     xd: u1,
+
+    pub fn kernel_page(phys_addr: u31) linksection(".text.boot") @This() {
+        return PDE{
+            .p = 1,
+            .r_w = 1,
+            .u_s = 0,
+            .pwt = 0,
+            .pcd = 0,
+            .g = 0,
+            .pat = 0,
+            .phys_addr = phys_addr,
+            .pk = 0,
+            .xd = 0,
+        };
+    }
 };
 
 extern var kernel_physical_start: u8;
@@ -89,6 +104,13 @@ extern var PML4T: [512]PML4E align(0x1000) linksection(".bss.boot");
 
 var kernelPDPT: [512]PDPTE align(0x1000) linksection(".bss.boot") = undefined;
 var kernelPD: [512]PDE align(0x1000) linksection(".bss.boot") = undefined;
+var last_allocated_kernel_directory_page: usize linksection(".bss.boot") = 0;
+
+const higher_half_base: comptime_int = 0xFFFFFFFF80000000;
+
+// initialized after .init()
+var kernel_pml4_idx: usize linksection(".data.boot") = 0;
+var kernel_pdpt_idx: usize linksection(".data.boot") = 0;
 
 pub fn init() linksection(".text.boot") void {
     // if an integer overflow happens here, calling @panic would just cause a page fault because the page did not get created
@@ -105,33 +127,38 @@ pub fn init() linksection(".text.boot") void {
     const kernel_size_in_4KIB_pages_count: usize = @intFromPtr(&kernel_size_in_4KIB_pages);
     const kernel_size_2MIB_pages: usize = @divFloor(kernel_size_in_4KIB_pages_count - 1, 512) + 1;
 
-    const higher_half_base = 0xFFFFFFFF80000000;
     const kernel_virtual_start = higher_half_base + kernel_physical_start_addr;
 
     // the first index of the PDE corresponding to the kernel
     const kernel_physical_start_pde_idx = (kernel_physical_start_addr >> 21) & 0x1ff;
 
-    const kernel_pml4_idx = @as(u9, @truncate(kernel_virtual_start >> 39));
-    const kernel_pdpt_idx = @as(u9, @truncate(kernel_virtual_start >> 30));
+    kernel_pml4_idx = @as(u9, @truncate(kernel_virtual_start >> 39));
+    kernel_pdpt_idx = @as(u9, @truncate(kernel_virtual_start >> 30));
 
     for (0..kernel_size_2MIB_pages) |i| {
         const pdei = i + kernel_physical_start_pde_idx;
 
-        kernelPD[pdei] = PDE{
-            .p = 1,
-            .r_w = 1,
-            .u_s = 0,
-            .pwt = 0,
-            .pcd = 0,
-            .g = 0,
-            .pat = 0,
-            .phys_addr = @truncate(pdei),
-            .pk = 0,
-            .xd = 0,
-        };
+        kernelPD[pdei] = PDE.kernel_page(@truncate(pdei));
     }
+    // last pdei value
+    last_allocated_kernel_directory_page = kernel_size_2MIB_pages - 1 + kernel_physical_start_pde_idx;
 
     kernelPDPT[kernel_pdpt_idx] = PDPTE.kernel_page(@intFromPtr(&kernelPD));
     // only update PML4 once everything is set up
     PML4T[kernel_pml4_idx] = PML4E.kernel_page(@intFromPtr(&kernelPDPT));
+}
+
+/// allocates and returns an aligned virtual addr of a free 2MiB page.
+///  virtual addr lives inside the higher half mapping
+pub fn alloc_page() !u64 {
+    if (last_allocated_kernel_directory_page + 1 >= kernelPD.len)
+        return error.PageDirectoryFull;
+
+    const last_allocated_phys = kernelPD[last_allocated_kernel_directory_page].phys_addr;
+    last_allocated_kernel_directory_page +%= 1;
+
+    const new_pd_idx = last_allocated_kernel_directory_page;
+    kernelPD[new_pd_idx] = PDE.kernel_page(last_allocated_phys +% 1);
+
+    return (new_pd_idx << 21) | (kernel_pdpt_idx << 30) | (kernel_pml4_idx << 39) | (0xffff << 48);
 }
