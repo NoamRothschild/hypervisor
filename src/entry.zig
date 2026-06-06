@@ -1,3 +1,6 @@
+const paging = @import("paging.zig");
+const kmain = @import("main.zig").kmain;
+
 const multiboot2_header_magic = 0xe85250d6;
 const grub_multiboot_architecture_i386 = 0;
 
@@ -15,8 +18,8 @@ export const multiboot_header: MultiBootHeaderV2 align(4) linksection(".multiboo
 export fn realMode64() linksection(".text.boot") callconv(.C) void {
     // TODO: set up paging properly.
     //  use the externed symbols from the linker.ld file like kernel_physical_start, kernel_physical_end
-
-    @import("paging.zig").init();
+    paging.init();
+    kmain();
 }
 
 // var PML4T: [512]u64 align(0x1000) = [_]u64{0} ** 512;

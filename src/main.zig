@@ -3,7 +3,7 @@ comptime {
     _ = @import("paging.zig");
 }
 
-export fn kmain() void {
+pub export fn kmain() void {
     asm volatile (
         \\ mov $0x144, %eax
         \\ mov $0x144, %eax
