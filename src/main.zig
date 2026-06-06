@@ -16,6 +16,8 @@ pub export fn kmain() void {
         debug.printf("allocated a new page at addr {*}\n", .{page_addr});
         const first = page_addr[0];
         debug.printf("read from my_special_addr: {d}\n", .{first});
+
+        paging.unmap_page(@intFromPtr(page_addr));
     }
 
     asm volatile (

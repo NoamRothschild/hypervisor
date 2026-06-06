@@ -162,3 +162,20 @@ pub fn alloc_page() !u64 {
 
     return (new_pd_idx << 21) | (kernel_pdpt_idx << 30) | (kernel_pml4_idx << 39) | (0xffff << 48);
 }
+
+pub fn unmap_page(virt_addr: u64) void {
+    const pml4_idx: usize = (virt_addr >> 39) & 0x1ff;
+    const pdpt_idx: usize = (virt_addr >> 30) & 0x1ff;
+    const pd_idx: usize = (virt_addr >> 21) & 0x1ff;
+
+    if (pml4_idx != kernel_pml4_idx)
+        @panic("tried to unmap a page inside a pml4e that is not the kernel pml4e");
+
+    if (pdpt_idx != kernel_pdpt_idx)
+        @panic("tried to unmap a page inside a pdpte that is not the kernel pdpte");
+
+    if (kernelPD[pd_idx].p == 0)
+        @panic("tried to unmap a page with present already set to false");
+
+    kernelPD[pd_idx].p = 0;
+}
