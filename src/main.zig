@@ -1,3 +1,4 @@
+const std = @import("std");
 const debug = @import("debug.zig");
 const paging = @import("paging.zig");
 
@@ -30,3 +31,9 @@ pub export fn kmain() void {
         \\ mov $0x144, %rax
     );
 }
+
+pub const panic = debug.panic;
+pub const std_options = std.Options{
+    .log_level = .debug,
+    .logFn = debug.logFn,
+};

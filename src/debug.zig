@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log;
 
 pub inline fn outb(port: u16, byte: u8) void {
     asm volatile (
@@ -38,4 +39,33 @@ pub const outWriter = std.io.Writer(void, error{}, (struct {
 
 pub fn printf(comptime format: []const u8, args: anytype) void {
     std.fmt.format(outWriter, format, args) catch unreachable;
+}
+
+pub const panic = std.debug.FullPanic(panicFn);
+
+fn panicFn(err: []const u8, ra: ?usize) noreturn {
+    @branchHint(.cold);
+    _ = ra;
+
+    printf("PANIC!: {s}\n", .{err});
+    printf("return address: 0x{x} frame address: 0x{x}\n", .{ @returnAddress(), @frameAddress() });
+
+    while (true) {}
+}
+
+pub fn logFn(
+    comptime message_level: log.Level,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    _ = scope;
+    const prefix = switch (message_level) {
+        .debug => "[debug] ",
+        .err => "[err] ",
+        .info => "[info] ",
+        .warn => "[warn] ",
+    };
+    printf("{s}", .{prefix});
+    printf(format, args);
 }
