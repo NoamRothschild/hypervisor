@@ -61,6 +61,7 @@ pub fn build(b: *std.Build) void {
 
     const assembly_files = [_]struct { []const u8, []const u8 }{
         .{ "src/arch/x86_64/entry.asm", "entry" },
+        .{ "src/arch/x86_64/interrupts.asm", "interrupts" },
     };
 
     for (assembly_files) |pair|

@@ -1,4 +1,5 @@
 const paging = @import("paging.zig");
+const idt = @import("idt.zig");
 const kmain = @import("../../main.zig").kmain;
 
 const multiboot2_header_magic = 0xe85250d6;
@@ -19,6 +20,8 @@ export fn realMode64() linksection(".text.boot") callconv(.c) void {
     // TODO: set up paging properly.
     //  use the externed symbols from the linker.ld file like kernel_physical_start, kernel_physical_end
     paging.init();
+    // paging has to be initialized before idt because idt code lives in unmapped area
+    idt.init();
     kmain();
 }
 

@@ -21,14 +21,11 @@ pub export fn kmain() void {
         paging.unmap_page(@intFromPtr(page_addr));
     }
 
+    asm volatile ("int $144");
+
     asm volatile (
-        \\ mov $0x144, %%eax
-        \\ mov $0x144, %%eax
-        \\ mov $0x144, %%rax
-        \\ mov $0x144, %%eax
-        \\ mov $0x144, %%eax
-        \\ mov $0x144, %%eax
-        \\ mov $0x144, %%rax
+        \\ mov $0, %%eax
+        \\ div %%eax
     );
 }
 
