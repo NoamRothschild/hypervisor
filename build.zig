@@ -60,7 +60,7 @@ pub fn build(b: *std.Build) void {
     kernel.use_lld = true;
 
     const assembly_files = [_]struct { []const u8, []const u8 }{
-        .{ "src/entry.asm", "entry" },
+        .{ "src/arch/x86_64/entry.asm", "entry" },
     };
 
     for (assembly_files) |pair|

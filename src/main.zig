@@ -1,10 +1,10 @@
 const std = @import("std");
 const debug = @import("debug.zig");
-const paging = @import("paging.zig");
+const paging = @import("arch/x86_64/paging.zig");
 
 comptime {
-    _ = @import("entry.zig");
-    _ = @import("paging.zig");
+    _ = @import("arch/x86_64/entry.zig");
+    _ = @import("arch/x86_64/paging.zig");
 }
 
 pub export fn kmain() void {
