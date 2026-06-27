@@ -1,6 +1,7 @@
 const std = @import("std");
 const syscall = @import("syscall.zig");
 const interrupts = @import("interrupts.zig");
+const pic = @import("pic.zig");
 
 /// offsets from the GDT table present inside entry.asm
 pub const gdt_offsets = struct {
@@ -45,7 +46,14 @@ var idt_descriptor = extern struct {
 };
 
 inline fn isrAddress(comptime vector: comptime_int) u64 {
+    @setEvalBranchQuota(10000);
     const symbol = comptime std.fmt.comptimePrint("isr_{d}", .{vector});
+    return @intFromPtr(@extern(*const anyopaque, .{ .name = symbol }));
+}
+
+inline fn irqAddress(comptime vector: comptime_int) u64 {
+    @setEvalBranchQuota(10000);
+    const symbol = comptime std.fmt.comptimePrint("irq_{d}", .{vector});
     return @intFromPtr(@extern(*const anyopaque, .{ .name = symbol }));
 }
 
@@ -88,30 +96,21 @@ inline fn initTable() void {
             .p = 1,
         });
 
-    // for (0..16) |i|
-    //     entries[i + 32] = makeState(.{
-    //         .offset = idt_irqByIndex(i),
-    //         .segment_selector = .{
-    //             .index = gdt_offsets.kernel_codeseg,
-    //             .rpl = 0x0,
-    //             .ti = 0,
-    //         },
-    //         .gate_type = gate_types.intr_gate32bit,
-    //         .dpl = 0x0,
-    //         .p = 1,
-    //     });
+    // irq gates
+    inline for (32..48) |i|
+        entries[i] = makeState(.{
+            .offset = irqAddress(i),
+            .segment_selector = .{
+                .index = gdt_offsets.kernel_codeseg,
+                .rpl = 0x0,
+                .ti = 0,
+            },
+            .gate_type = gate_types.trap_gate64bit,
+            .dpl = 0x0,
+            .p = 1,
+        });
 
     entries[syscall.id] = syscall_gate;
-}
-
-/// disable the PIC to avoid it from using a non-complete IDT
-/// TODO: remove this when IDT will finish supporting IRQs
-fn maskPic() void {
-    asm volatile (
-        \\ mov $0xff, %%al
-        \\ outb %%al, $0x21
-        \\ outb %%al, $0xA1
-        ::: .{ .memory = true });
 }
 
 pub fn init() void {
@@ -119,7 +118,7 @@ pub fn init() void {
     syscall.init();
 
     initTable();
-    maskPic();
+    pic.init();
 
     idt_descriptor.limit = @sizeOf(@TypeOf(entries)) - 1;
     idt_descriptor.base = @intFromPtr(&entries);
@@ -128,6 +127,8 @@ pub fn init() void {
         :
         : [desc] "r" (&idt_descriptor),
         : .{ .memory = true });
+
+    asm volatile ("sti");
 }
 
 fn makeState(config: struct { offset: u64, segment_selector: SegmentSelector, gate_type: u4, dpl: u2, p: u1 }) IdtGate {

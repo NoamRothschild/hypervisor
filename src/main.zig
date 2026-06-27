@@ -23,10 +23,7 @@ pub export fn kmain() void {
 
     asm volatile ("int $144");
 
-    asm volatile (
-        \\ mov $0, %%eax
-        \\ div %%eax
-    );
+    while (true) {}
 }
 
 pub const panic = debug.panic;
