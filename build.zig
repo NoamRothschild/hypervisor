@@ -13,14 +13,14 @@ fn addNasmFile(b: *std.Build, kernel: *std.Build.Step.Compile, source_path: []co
         source_path,
     });
 
-    kernel.addObjectFile(b.path(output_path));
+    kernel.root_module.addObjectFile(b.path(output_path));
     kernel.step.dependOn(&nasm_command.step);
 }
 
 pub fn build(b: *std.Build) void {
     const wf = b.addWriteFiles();
-    var disabled_features = std.Target.Cpu.Feature.Set.empty;
-    var enabled_features = std.Target.Cpu.Feature.Set.empty;
+    var disabled_features: std.Target.Cpu.Feature.Set = .empty;
+    var enabled_features: std.Target.Cpu.Feature.Set = .empty;
 
     disabled_features.addFeature(@intFromEnum(std.Target.x86.Feature.mmx));
     disabled_features.addFeature(@intFromEnum(std.Target.x86.Feature.sse));
@@ -39,6 +39,7 @@ pub fn build(b: *std.Build) void {
 
     const optimize = b.standardOptimizeOption(.{});
     const default_step = b.getInstallStep();
+    const target = b.resolveTargetQuery(target_query);
 
     const root_file = "src/main.zig";
     const linker_script = "src/linker.ld";
@@ -47,11 +48,16 @@ pub fn build(b: *std.Build) void {
     // Create kernel executable
     const kernel = b.addExecutable(.{
         .name = "kernel.elf",
-        .root_source_file = b.path(root_file),
-        .target = b.resolveTargetQuery(target_query),
-        .optimize = optimize,
-        .code_model = .kernel,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(root_file),
+            .target = target,
+            .optimize = optimize,
+            .code_model = .kernel,
+        }),
     });
+    // Linker-script symbols require LLVM + LLD.
+    kernel.use_llvm = true;
+    kernel.use_lld = true;
 
     const assembly_files = [_]struct { []const u8, []const u8 }{
         .{ "src/entry.asm", "entry" },

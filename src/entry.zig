@@ -15,7 +15,7 @@ pub const MultiBootHeaderV2 = extern struct {
 export const multiboot_header: MultiBootHeaderV2 align(4) linksection(".multiboot") = .{};
 
 /// gets called at the end of entry.asm
-export fn realMode64() linksection(".text.boot") callconv(.C) void {
+export fn realMode64() linksection(".text.boot") callconv(.c) void {
     // TODO: set up paging properly.
     //  use the externed symbols from the linker.ld file like kernel_physical_start, kernel_physical_end
     paging.init();
@@ -43,7 +43,7 @@ export fn realMode64() linksection(".text.boot") callconv(.C) void {
 //     );
 // }
 //
-// pub fn start() callconv(.C) void {
+// pub fn start() callconv(.c) void {
 //     // TODO: check for existence of CPUID, if exists check for long mode support
 //     // for now we assume they both exist
 //
@@ -59,7 +59,7 @@ export fn realMode64() linksection(".text.boot") callconv(.C) void {
 //         \\ mov %cr4, %eax
 //         \\ or $0x20, %eax
 //         \\ mov %eax, %cr4
-//         ::: "eax");
+//         :: .{ .eax = true });
 //
 //     asm volatile (
 //         \\ mov $0x144, %eax

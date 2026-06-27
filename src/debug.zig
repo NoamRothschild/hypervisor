@@ -3,14 +3,13 @@ const log = std.log;
 
 pub inline fn outb(port: u16, byte: u8) void {
     asm volatile (
-        \\ mov %[port], %dx
-        \\ mov %[byte], %al
-        \\ out %al, %dx
+        \\ mov %[port], %%dx
+        \\ mov %[byte], %%al
+        \\ out %%al, %%dx
         :
         : [port] "{dx}" (port),
           [byte] "{al}" (byte),
-        : "al", "dx"
-    );
+        : .{ .al = true, .dx = true });
 }
 
 pub inline fn inb(port: u16) u8 {
@@ -28,17 +27,37 @@ pub inline fn wait() void {
 
 pub const COM1 = 0x03F8;
 
-pub const outWriter = std.io.Writer(void, error{}, (struct {
-    pub fn callback(_: void, string: []const u8) error{}!usize {
-        for (string) |char| {
-            outb(COM1, char);
-        }
-        return string.len;
+fn serialDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+    for (w.buffer[0..w.end]) |byte| outb(COM1, byte);
+    w.end = 0;
+
+    if (data.len == 0) return 0;
+
+    var written: usize = 0;
+    for (data[0 .. data.len - 1]) |bytes| {
+        for (bytes) |byte| outb(COM1, byte);
+        written += bytes.len;
     }
-}).callback){ .context = {} };
+    const pattern = data[data.len - 1];
+    for (0..splat) |_| {
+        for (pattern) |byte| outb(COM1, byte);
+        written += pattern.len;
+    }
+    return written;
+}
+
+var serial_writer: std.Io.Writer = .{
+    .vtable = &.{
+        .drain = serialDrain,
+        .flush = std.Io.Writer.noopFlush,
+    },
+    .buffer = &.{},
+};
+
+pub const out_writer = &serial_writer;
 
 pub fn printf(comptime format: []const u8, args: anytype) void {
-    std.fmt.format(outWriter, format, args) catch unreachable;
+    std.Io.Writer.print(out_writer, format, args) catch unreachable;
 }
 
 pub const panic = std.debug.FullPanic(panicFn);
