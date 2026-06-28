@@ -1,5 +1,7 @@
+const std = @import("std");
 const paging = @import("paging.zig");
 const idt = @import("idt.zig");
+const debug = @import("../../debug.zig");
 const kmain = @import("../../main.zig").kmain;
 
 const multiboot2_header_magic = 0xe85250d6;
@@ -22,7 +24,17 @@ export fn realMode64() linksection(".text.boot") callconv(.c) void {
     paging.init();
     // paging has to be initialized before idt because idt code lives in unmapped area
     idt.init();
-    kmain();
+
+    kmain() catch |err| {
+        std.log.err("kmain failed with err {s}\n", .{@errorName(err)});
+        if (@errorReturnTrace()) |trace| {
+            debug.printf("call stack trace:\n", .{});
+            const len = @min(trace.instruction_addresses.len, trace.index);
+            for (trace.instruction_addresses[0..len], 0..) |addr, i| {
+                debug.printf("  #{d}: 0x{x}\n", .{ i, addr });
+            }
+        }
+    };
 }
 
 // var PML4T: [512]u64 align(0x1000) = [_]u64{0} ** 512;

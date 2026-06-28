@@ -61,6 +61,7 @@ PAGE_TABLE_SIZE equ ENTRY_BYTE_SIZE * ENTRY_COUNT
 CR4_PAE_ENABLE equ 1 << 5
 CR0_PM_ENABLE equ 1 << 0
 CR0_PG_ENABLE equ 1 << 31
+CR0_NE_ENABLE equ 1 << 5
 
 extern realMode64
 global _start
@@ -135,7 +136,7 @@ _start:
 
 .enablePaging:
   mov eax, cr0
-  or eax, CR0_PG_ENABLE | CR0_PM_ENABLE
+  or eax, CR0_PG_ENABLE | CR0_PM_ENABLE | CR0_NE_ENABLE
   mov cr0, eax
 
 .loadGDT:

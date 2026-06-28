@@ -8,10 +8,16 @@ comptime {
     _ = @import("arch/x86_64/paging.zig");
 }
 
-pub export fn kmain() void {
+export fn kmain_start() void {}
+comptime {
+    @export(&kmain_start, .{ .name = "kmain" });
+}
+
+pub fn kmain() !void {
+    kmain_start();
     debug.printf("inside kmain!\n", .{});
     for (0..10) |_| {
-        const page_addr: [*]usize = @ptrFromInt(paging.alloc_page() catch |err| {
+        const page_addr: [*]usize = @ptrFromInt(paging.allocPage() catch |err| {
             debug.printf("page allocation failed with: {s}\n", .{@errorName(err)});
             return;
         });
@@ -19,7 +25,7 @@ pub export fn kmain() void {
         const first = page_addr[0];
         debug.printf("read from my_special_addr: {d}\n", .{first});
 
-        paging.unmap_page(@intFromPtr(page_addr));
+        paging.unmapPage(@intFromPtr(page_addr));
     }
 
     asm volatile ("int $144");
@@ -34,6 +40,13 @@ pub export fn kmain() void {
     vmx.enableOperation();
     std.log.info("vmx enabled\n", .{});
 
+    vmx.allocVmxonRegion() catch |err| {
+        std.log.err("VMXON failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
+    std.log.info("VMXON succeeded\n", .{});
+
     trap();
 }
 
@@ -46,4 +59,5 @@ pub const panic = debug.panic;
 pub const std_options = std.Options{
     .log_level = .debug,
     .logFn = debug.logFn,
+    .page_size_max = 0x1000,
 };

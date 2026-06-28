@@ -150,9 +150,7 @@ pub fn init() linksection(".text.boot") void {
     asm volatile (
         \\ mov %%cr3, %%rax
         \\ mov %%rax, %%cr3
-        :
-        :
-        : .{ .rax = true, .memory = true });
+        ::: .{ .rax = true, .memory = true });
 }
 
 /// allocates and returns an aligned virtual addr of a free 2MiB page.
@@ -160,7 +158,7 @@ pub fn init() linksection(".text.boot") void {
 ///
 /// TODO: move page allocation into a different pml4e / pdpte,
 /// use a StaticBitSet instead of the last allocated mechanism
-pub fn alloc_page() !u64 {
+pub fn allocPage() !u64 {
     if (last_allocated_kernel_directory_page + 1 >= kernelPD.len)
         return error.PageDirectoryFull;
 
@@ -173,7 +171,7 @@ pub fn alloc_page() !u64 {
     return (new_pd_idx << 21) | (kernel_pdpt_idx << 30) | (kernel_pml4_idx << 39) | (0xffff << 48);
 }
 
-pub fn unmap_page(virt_addr: u64) void {
+pub fn unmapPage(virt_addr: u64) void {
     const pml4_idx: usize = (virt_addr >> 39) & 0x1ff;
     const pdpt_idx: usize = (virt_addr >> 30) & 0x1ff;
     const pd_idx: usize = (virt_addr >> 21) & 0x1ff;
@@ -188,4 +186,22 @@ pub fn unmap_page(virt_addr: u64) void {
         @panic("tried to unmap a page with present already set to false");
 
     kernelPD[pd_idx].p = 0;
+}
+
+/// returns the physical addr of virt_addr if found, else null.
+/// only looks up from addesses received from alloc_page()
+/// assumes inside a 2 MiB page.
+pub fn physAddr(virt_addr: u64) ?u64 {
+    const pml4_idx: usize = (virt_addr >> 39) & 0x1ff;
+    const pdpt_idx: usize = (virt_addr >> 30) & 0x1ff;
+    const pd_idx: usize = (virt_addr >> 21) & 0x1ff;
+
+    if (pml4_idx != kernel_pml4_idx)
+        return null;
+
+    if (pdpt_idx != kernel_pdpt_idx)
+        return null;
+
+    // if (kernelPD[pd_idx].ps = 0) // PT with 4KiB entries
+    return (kernelPD[pd_idx].phys_addr << 21) | (virt_addr & 0x1f_ffff);
 }

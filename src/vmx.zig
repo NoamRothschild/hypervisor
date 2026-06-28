@@ -1,4 +1,5 @@
 const std = @import("std");
+const paging = @import("arch/x86_64/paging.zig");
 const debug = @import("debug.zig");
 
 pub inline fn supportsVirtualization() bool {
@@ -21,14 +22,94 @@ pub inline fn supportsVirtualization() bool {
     return true;
 }
 
-/// enables VMXE (bit 13 of cr4)
+var vmxon_page: [4096]u8 align(4096) linksection(".bss") = [_]u8{0} ** 4096;
+var vmxon_phys_ptr: u64 align(8) linksection(".bss") = 0;
+
+/// Sets CR0/CR4 to values required for VMX operation (including VMXE).
 pub fn enableOperation() void {
+    var cr0: u64 = undefined;
+    var cr4: u64 = undefined;
+
+    asm volatile ("mov %%cr0, %[cr0]"
+        : [cr0] "=r" (cr0),
+    );
+    asm volatile ("mov %%cr4, %[cr4]"
+        : [cr4] "=r" (cr4),
+    );
+
+    const cr0_fixed0 = rdmsr(vt_msrs.IA32_VMX_CR0_FIXED0);
+    const cr0_fixed1 = rdmsr(vt_msrs.IA32_VMX_CR0_FIXED1);
+    const cr4_fixed0 = rdmsr(vt_msrs.IA32_VMX_CR4_FIXED0);
+    const cr4_fixed1 = rdmsr(vt_msrs.IA32_VMX_CR4_FIXED1);
+
+    cr0 |= cr0_fixed0;
+    cr0 &= cr0_fixed1;
+    cr4 |= cr4_fixed0;
+    cr4 &= cr4_fixed1;
+
+    asm volatile ("mov %[cr0], %%cr0"
+        :
+        : [cr0] "r" (cr0),
+        : .{ .memory = true });
+    asm volatile ("mov %[cr4], %%cr4"
+        :
+        : [cr4] "r" (cr4),
+        : .{ .memory = true });
+}
+
+pub const VMState = extern struct {
+    vmxon_region: u64,
+    vmcs_region: u64,
+};
+
+var guest_state: VMState = .{ .vmxon_region = 0, .vmcs_region = 0 };
+
+/// Prepares the VMXON region and executes VMXON.
+pub fn allocVmxonRegion() !void {
+    const vmxon_virt = @intFromPtr(&vmxon_page);
+    const vmxon_region_phys = paging.physAddr(vmxon_virt) orelse return error.vmxon_region_not_mapped;
+
+    std.log.info("virtual buff addr for VMXON at 0x{x}\n", .{vmxon_virt});
+    std.log.info("physical buff addr for VMXON at 0x{x}\n", .{vmxon_region_phys});
+
+    @memset(&vmxon_page, 0);
+
+    const basic = rdmsr(vt_msrs.IA32_VMX_BASIC);
+    const revision_identifier: u32 = @truncate(basic);
+    std.log.info("IA32_VMX_BASIC revision identifier: 0x{x}\n", .{revision_identifier});
+
+    @as(*volatile u32, @ptrCast(&vmxon_page)).* = revision_identifier;
+
+    vmxon_phys_ptr = vmxon_region_phys;
+
+    // carry flag result
+    var failed: u8 = undefined;
+    // zero flag result
+    var valid_fail: u8 = undefined;
     asm volatile (
-        \\ xor %rax, %rax
-        \\ mov %cr4, %rax
-        \\ or $0x2000, %rax
-        \\ mov %rax, %cr4
-        ::: .{ .rax = true });
+        \\ vmxon (%[vmxon_phys_ptr])
+        \\ setc %[failed]
+        \\ setz %[valid_fail]
+        : [failed] "=qm" (failed),
+          [valid_fail] "=qm" (valid_fail),
+        : [vmxon_phys_ptr] "r" (&vmxon_phys_ptr),
+    );
+
+    if (failed != 0)
+        return error.vmxon_failed_cf;
+
+    if (valid_fail != 0) {
+        var ret: u64 = 0;
+        asm volatile ("vmread %[field], %[ret]"
+            : [ret] "=rm" (ret),
+            : [field] "r" (0x00004400),
+        );
+
+        debug.printf("vmxon failed with {d}\n", .{ret});
+        return error.vmxon_failed_with_code;
+    }
+
+    guest_state.vmxon_region = vmxon_region_phys;
 }
 
 pub inline fn rdmsr(msr_id: u32) u64 {
@@ -68,6 +149,27 @@ pub const msr = struct {
     pub const IA32_FEATURE_CONTROL = 0x0000003a;
     pub const IA32_TSC_ADJUST = 0x0000003b;
     pub const IA32_BNDCFGS = 0x00000d90;
+};
+
+pub const vt_msrs = struct {
+    pub const IA32_VMX_BASIC = 0x00000480;
+    pub const IA32_VMX_PINBASED_CTLS = 0x00000481;
+    pub const IA32_VMX_PROCBASED_CTLS = 0x00000482;
+    pub const IA32_VMX_EXIT_CTLS = 0x00000483;
+    pub const IA32_VMX_ENTRY_CTLS = 0x00000484;
+    pub const IA32_VMX_MISC = 0x00000485;
+    pub const IA32_VMX_CR0_FIXED0 = 0x00000486;
+    pub const IA32_VMX_CR0_FIXED1 = 0x00000487;
+    pub const IA32_VMX_CR4_FIXED0 = 0x00000488;
+    pub const IA32_VMX_CR4_FIXED1 = 0x00000489;
+    pub const IA32_VMX_VMCS_ENUM = 0x0000048a;
+    pub const IA32_VMX_PROCBASED_CTLS2 = 0x0000048b;
+    pub const IA32_VMX_EPT_VPID_CAP = 0x0000048c;
+    pub const IA32_VMX_TRUE_PINBASED_CTLS = 0x0000048d;
+    pub const IA32_VMX_TRUE_PROCBASED_CTLS = 0x0000048e;
+    pub const IA32_VMX_TRUE_EXIT_CTLS = 0x0000048f;
+    pub const IA32_VMX_TRUE_ENTRY_CTLS = 0x00000490;
+    pub const IA32_VMX_VMFUNC = 0x00000491;
 };
 
 pub const IA32_FEATURE_CONTROL = packed struct(u64) {
