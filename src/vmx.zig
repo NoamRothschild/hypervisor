@@ -22,9 +22,6 @@ pub inline fn supportsVirtualization() bool {
     return true;
 }
 
-var vmxon_page: [4096]u8 align(4096) linksection(".bss") = [_]u8{0} ** 4096;
-var vmxon_phys_ptr: u64 align(8) linksection(".bss") = 0;
-
 /// Sets CR0/CR4 to values required for VMX operation (including VMXE).
 pub fn enableOperation() void {
     var cr0: u64 = undefined;
@@ -66,33 +63,33 @@ var guest_state: VMState = .{ .vmxon_region = 0, .vmcs_region = 0 };
 
 /// Prepares the VMXON region and executes VMXON.
 pub fn allocVmxonRegion() !void {
-    const vmxon_virt = @intFromPtr(&vmxon_page);
+    const vmxon_virt = try paging.allocPage();
+    const vmxon_page: *align(4096) [4096]u8 = @ptrFromInt(vmxon_virt);
     const vmxon_region_phys = paging.physAddr(vmxon_virt) orelse return error.vmxon_region_not_mapped;
 
     std.log.info("virtual buff addr for VMXON at 0x{x}\n", .{vmxon_virt});
     std.log.info("physical buff addr for VMXON at 0x{x}\n", .{vmxon_region_phys});
 
-    @memset(&vmxon_page, 0);
+    @memset(vmxon_page, 0);
 
     const basic = rdmsr(vt_msrs.IA32_VMX_BASIC);
     const revision_identifier: u32 = @truncate(basic);
     std.log.info("IA32_VMX_BASIC revision identifier: 0x{x}\n", .{revision_identifier});
 
-    @as(*volatile u32, @ptrCast(&vmxon_page)).* = revision_identifier;
-
-    vmxon_phys_ptr = vmxon_region_phys;
+    @as(*volatile u32, @ptrCast(vmxon_page)).* = revision_identifier;
 
     // carry flag result
     var failed: u8 = undefined;
     // zero flag result
     var valid_fail: u8 = undefined;
+
     asm volatile (
         \\ vmxon (%[vmxon_phys_ptr])
         \\ setc %[failed]
         \\ setz %[valid_fail]
         : [failed] "=qm" (failed),
           [valid_fail] "=qm" (valid_fail),
-        : [vmxon_phys_ptr] "r" (&vmxon_phys_ptr),
+        : [vmxon_phys_ptr] "r" (&vmxon_region_phys),
     );
 
     if (failed != 0)
