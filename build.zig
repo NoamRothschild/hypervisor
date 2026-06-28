@@ -93,7 +93,7 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        const run_qemu = b.addSystemCommand(&[_][]const u8{ "qemu-system-x86_64", "-cdrom", out_iso, "-serial", "stdio" });
+        const run_qemu = b.addSystemCommand(&[_][]const u8{ "qemu-system-x86_64", "-cdrom", out_iso, "-serial", "stdio", "-enable-kvm", "-cpu", "host,vmx=on" });
         const qemu_step = b.step("run", "compile & launch qemu");
 
         qemu_step.dependOn(default_step);
@@ -104,7 +104,7 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        const run_qemu = b.addSystemCommand(&[_][]const u8{ "qemu-system-x86_64", "-cdrom", out_iso, "-s", "-S", "-serial", "stdio" });
+        const run_qemu = b.addSystemCommand(&[_][]const u8{ "qemu-system-x86_64", "-cdrom", out_iso, "-s", "-S", "-serial", "stdio", "-enable-kvm", "-cpu", "host,vmx=on" });
         const qemu_step = b.step("debug", "compile & launch qemu with a debugger");
 
         qemu_step.dependOn(default_step);

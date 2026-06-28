@@ -23,7 +23,23 @@ pub export fn kmain() void {
 
     asm volatile ("int $144");
 
-    while (true) {}
+    debug.printf("vendor: {s}\n", .{debug.getVendor()});
+    debug.printf("features: {}\n", .{debug.getFeatures()});
+    if (!supportsVirtualization()) {
+        std.log.err("proccessor does not support VT-x virtualization.\n", .{});
+        trap();
+    }
+
+    trap();
+}
+
+inline fn supportsVirtualization() bool {
+    return std.mem.eql(u8, &debug.getVendor(), "GenuineIntel") and debug.getFeatures().vmx == 1;
+}
+
+inline fn trap() noreturn {
+    while (true)
+        asm volatile ("hlt");
 }
 
 pub const panic = debug.panic;

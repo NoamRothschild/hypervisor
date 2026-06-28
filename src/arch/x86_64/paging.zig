@@ -146,6 +146,13 @@ pub fn init() linksection(".text.boot") void {
     kernelPDPT[kernel_pdpt_idx] = PDPTE.kernel_page(@intFromPtr(&kernelPD));
     // only update PML4 once everything is set up
     PML4T[kernel_pml4_idx] = PML4E.kernel_page(@intFromPtr(&kernelPDPT));
+
+    asm volatile (
+        \\ mov %%cr3, %%rax
+        \\ mov %%rax, %%cr3
+        :
+        :
+        : .{ .rax = true, .memory = true });
 }
 
 /// allocates and returns an aligned virtual addr of a free 2MiB page.
