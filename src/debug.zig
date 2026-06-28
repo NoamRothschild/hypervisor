@@ -102,7 +102,7 @@ pub fn getVendor() [12]u8 {
         \\ mov %ecx, 8(%rax)
         :
         : [vendor] "{rax}" (&vendor),
-        : .{ .eax = true, .ebx = true, .ecx = true, .edx = true });
+        : .{ .rax = true, .ebx = true, .ecx = true, .edx = true });
 
     return vendor;
 }
@@ -110,8 +110,6 @@ pub fn getVendor() [12]u8 {
 pub fn getFeatures() CpuFeatures {
     var ecx: u32 = 0;
     var edx: u32 = 0;
-    // _ = &ecx;
-    // _ = &edx;
     asm volatile (
         \\ mov $1, %eax
         \\ cpuid

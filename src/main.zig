@@ -1,6 +1,7 @@
 const std = @import("std");
 const debug = @import("debug.zig");
 const paging = @import("arch/x86_64/paging.zig");
+const vmx = @import("vmx.zig");
 
 comptime {
     _ = @import("arch/x86_64/entry.zig");
@@ -25,16 +26,15 @@ pub export fn kmain() void {
 
     debug.printf("vendor: {s}\n", .{debug.getVendor()});
     debug.printf("features: {}\n", .{debug.getFeatures()});
-    if (!supportsVirtualization()) {
+    if (!vmx.supportsVirtualization()) {
         std.log.err("proccessor does not support VT-x virtualization.\n", .{});
         trap();
     }
 
-    trap();
-}
+    vmx.enableOperation();
+    std.log.info("vmx enabled\n", .{});
 
-inline fn supportsVirtualization() bool {
-    return std.mem.eql(u8, &debug.getVendor(), "GenuineIntel") and debug.getFeatures().vmx == 1;
+    trap();
 }
 
 inline fn trap() noreturn {
