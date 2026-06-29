@@ -1,3 +1,5 @@
+const std = @import("std");
+const assert = std.debug.assert;
 // This allows a processor to map 48-bit virtual addresses to 52-bit physical addresses.
 
 pub const PML4E = packed struct(u64) {
@@ -204,4 +206,42 @@ pub fn physAddr(virt_addr: u64) ?u64 {
 
     // if (kernelPD[pd_idx].ps = 0) // PT with 4KiB entries
     return (kernelPD[pd_idx].phys_addr << 21) | (virt_addr & 0x1f_ffff);
+}
+
+pub const Allocator4K = struct {
+    curr_page: ?u64 = null,
+    offset: u16 = 0,
+
+    pub const empty = Allocator4K{};
+
+    pub fn init(self: *@This()) !void {
+        self.curr_page = try allocPage();
+        self.offset = 0;
+    }
+
+    pub fn curr(self: *@This()) u64 {
+        assert(self.offset < 512);
+        assert(self.curr_page != null);
+
+        return self.curr_page.? + (self.offset << 12);
+    }
+
+    pub fn next(self: *@This()) !u64 {
+        defer self.offset += 1;
+        if (self.offset == 512 or self.curr_page == null)
+            try self.init();
+
+        return self.curr();
+    }
+};
+
+var alloc_4k_aligned_state: ?Allocator4K = null;
+
+/// allocates and returns an aligned virtual addr of a free 4KiB page.
+///  virtual addr lives inside the higher half mapping
+pub fn alloc4KAligned() !*align(4096) [4096]u8 {
+    if (alloc_4k_aligned_state == null)
+        alloc_4k_aligned_state = Allocator4K.empty;
+
+    return @ptrFromInt(try alloc_4k_aligned_state.?.next());
 }

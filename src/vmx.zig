@@ -63,8 +63,8 @@ var guest_state: VMState = .{ .vmxon_region = 0, .vmcs_region = 0 };
 
 /// Prepares the VMXON region and executes VMXON.
 pub fn allocVmxonRegion() !void {
-    const vmxon_virt = try paging.allocPage();
-    const vmxon_page: *align(4096) [4096]u8 = @ptrFromInt(vmxon_virt);
+    const vmxon_page = try paging.alloc4KAligned();
+    const vmxon_virt = @intFromPtr(vmxon_page);
     const vmxon_region_phys = paging.physAddr(vmxon_virt) orelse return error.vmxon_region_not_mapped;
 
     std.log.info("virtual buff addr for VMXON at 0x{x}\n", .{vmxon_virt});
