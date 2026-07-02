@@ -54,6 +54,8 @@ pub fn kmain() !void {
 
     std.log.info("VMPTRLD succeeded\n", .{});
 
+    // NOTE: idk if defer is the right thing here. there might be cases where we want to keep it alive
+    defer vmx.terminateVmx();
     trap();
 }
 

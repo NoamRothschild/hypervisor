@@ -140,7 +140,7 @@ pub fn allocVmcsRegion() !void {
     );
 
     if (cf != 0) {
-        debug.printf("vmptrld failed with {s} (zf={d})\n", .{ if (zf == 0) "VMFailInvalid" else "VMFailValid", @intFromBool(zf != 0) });
+        std.log.err("vmptrld failed with {s} (zf={d})\n", .{ if (zf == 0) "VMFailInvalid" else "VMFailValid", @intFromBool(zf != 0) });
         if (zf != 0) {
             // read the instruction error field to get the error code
             var ret: u64 = 0;
@@ -154,6 +154,11 @@ pub fn allocVmcsRegion() !void {
     }
 
     guest_state.vmcs_region = vmcs_region_phys;
+}
+
+pub fn terminateVmx() void {
+    std.log.info("terminating vmx...\n", .{});
+    asm volatile ("vmxoff");
 }
 
 pub inline fn rdmsr(msr_id: u32) u64 {
