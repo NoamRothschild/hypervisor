@@ -47,6 +47,13 @@ pub fn kmain() !void {
 
     std.log.info("VMXON succeeded\n", .{});
 
+    vmx.allocVmcsRegion() catch |err| {
+        std.log.err("VMCS allocation or VMPTRLD failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
+    std.log.info("VMPTRLD succeeded\n", .{});
+
     trap();
 }
 

@@ -96,6 +96,7 @@ pub fn allocVmxonRegion() !void {
         return error.vmxon_failed_cf;
 
     if (valid_fail != 0) {
+        // read the instruction error field to get the error code
         var ret: u64 = 0;
         asm volatile ("vmread %[field], %[ret]"
             : [ret] "=rm" (ret),
@@ -107,6 +108,52 @@ pub fn allocVmxonRegion() !void {
     }
 
     guest_state.vmxon_region = vmxon_region_phys;
+}
+
+/// Prepares the VMCS region and executes VMPTRLD.
+pub fn allocVmcsRegion() !void {
+    const vmcs_page = try paging.alloc4KAligned();
+    const vmcs_virt = @intFromPtr(vmcs_page);
+    const vmcs_region_phys = paging.physAddr(vmcs_virt) orelse return error.vmcs_region_not_mapped;
+
+    std.log.info("virtual buff addr for VMCS at 0x{x}\n", .{vmcs_virt});
+    std.log.info("physical buff addr for VMCS at 0x{x}\n", .{vmcs_region_phys});
+
+    @memset(vmcs_page, 0);
+
+    const basic = rdmsr(vt_msrs.IA32_VMX_BASIC);
+    const revision_identifier: u32 = @truncate(basic);
+    std.log.info("IA32_VMX_BASIC revision identifier: 0x{x}\n", .{revision_identifier});
+
+    @as(*volatile u32, @ptrCast(vmcs_page)).* = revision_identifier;
+
+    var cf: u8 = undefined;
+    var zf: u8 = undefined;
+
+    asm volatile (
+        \\ vmptrld (%[vmcs_phys_ptr])
+        \\ setc %[cf]
+        \\ setz %[zf]
+        : [cf] "=qm" (cf),
+          [zf] "=qm" (zf),
+        : [vmcs_phys_ptr] "r" (&vmcs_region_phys),
+    );
+
+    if (cf != 0) {
+        debug.printf("vmptrld failed with {s} (zf={d})\n", .{ if (zf == 0) "VMFailInvalid" else "VMFailValid", @intFromBool(zf != 0) });
+        if (zf != 0) {
+            // read the instruction error field to get the error code
+            var ret: u64 = 0;
+            asm volatile ("vmread %[field], %[ret]"
+                : [ret] "=rm" (ret),
+                : [field] "r" (0x00004400),
+            );
+            debug.printf("vmptrld failiure error code: {d}", .{ret});
+        }
+        return error.vmtprld_failed;
+    }
+
+    guest_state.vmcs_region = vmcs_region_phys;
 }
 
 pub inline fn rdmsr(msr_id: u32) u64 {
