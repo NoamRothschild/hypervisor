@@ -2,6 +2,7 @@ const std = @import("std");
 const debug = @import("debug.zig");
 const paging = @import("arch/x86_64/paging.zig");
 const vmx = @import("vmx.zig");
+const ept = @import("arch/x86_64/ept.zig");
 
 comptime {
     _ = @import("arch/x86_64/entry.zig");
@@ -53,6 +54,8 @@ pub fn kmain() !void {
     };
 
     std.log.info("VMPTRLD succeeded\n", .{});
+
+    vmx.guest_state.eptp = paging.physAddr(@intFromPtr(try ept.init())).?;
 
     // NOTE: idk if defer is the right thing here. there might be cases where we want to keep it alive
     defer vmx.terminateVmx();

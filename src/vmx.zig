@@ -55,11 +55,15 @@ pub fn enableOperation() void {
 }
 
 pub const VMState = extern struct {
+    /// phys addr
     vmxon_region: u64,
+    /// phys addr
     vmcs_region: u64,
+    /// phys addr
+    eptp: u64,
 };
 
-var guest_state: VMState = .{ .vmxon_region = 0, .vmcs_region = 0 };
+pub var guest_state: VMState = .{ .vmxon_region = 0, .vmcs_region = 0, .eptp = 0 };
 
 /// Prepares the VMXON region and executes VMXON.
 pub fn allocVmxonRegion() !void {
