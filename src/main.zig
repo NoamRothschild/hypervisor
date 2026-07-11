@@ -1,8 +1,8 @@
 const std = @import("std");
 const debug = @import("debug.zig");
 const paging = @import("arch/x86_64/paging.zig");
-const vmx = @import("vmx.zig");
-const ept = @import("arch/x86_64/ept.zig");
+const vmx = @import("virt/vmx.zig");
+const ept = @import("virt/ept.zig");
 
 comptime {
     _ = @import("arch/x86_64/entry.zig");
@@ -47,6 +47,7 @@ pub fn kmain() !void {
     };
 
     std.log.info("VMXON succeeded\n", .{});
+    defer vmx.vmxoff();
 
     vmx.allocVmcsRegion() catch |err| {
         std.log.err("VMCS allocation or VMPTRLD failed: {s}\n", .{@errorName(err)});
@@ -57,8 +58,6 @@ pub fn kmain() !void {
 
     vmx.guest_state.eptp = paging.physAddr(@intFromPtr(try ept.init())).?;
 
-    // NOTE: idk if defer is the right thing here. there might be cases where we want to keep it alive
-    defer vmx.terminateVmx();
     trap();
 }
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const paging = @import("paging.zig");
+const paging = @import("../arch/x86_64/paging.zig");
 // set the 7th bit of PDPTE to map a 1 GB page
 // set the 7th bit of PDE to maps a 2 MB page
 // note that in both scenarios the structure of the entry will differ. look in the intel manual for it.

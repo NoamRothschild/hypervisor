@@ -1,6 +1,6 @@
 const std = @import("std");
-const paging = @import("arch/x86_64/paging.zig");
-const debug = @import("debug.zig");
+const paging = @import("../arch/x86_64/paging.zig");
+const debug = @import("../debug.zig");
 
 pub inline fn supportsVirtualization() bool {
     if (!std.mem.eql(u8, &debug.getVendor(), "GenuineIntel"))
@@ -100,14 +100,7 @@ pub fn allocVmxonRegion() !void {
         return error.vmxon_failed_cf;
 
     if (valid_fail != 0) {
-        // read the instruction error field to get the error code
-        var ret: u64 = 0;
-        asm volatile ("vmread %[field], %[ret]"
-            : [ret] "=rm" (ret),
-            : [field] "r" (0x00004400),
-        );
-
-        debug.printf("vmxon failed with {d}\n", .{ret});
+        debug.printf("vmxon failed with {d}\n", .{vmerr()});
         return error.vmxon_failed_with_code;
     }
 
@@ -146,13 +139,7 @@ pub fn allocVmcsRegion() !void {
     if (cf != 0) {
         std.log.err("vmptrld failed with {s} (zf={d})\n", .{ if (zf == 0) "VMFailInvalid" else "VMFailValid", @intFromBool(zf != 0) });
         if (zf != 0) {
-            // read the instruction error field to get the error code
-            var ret: u64 = 0;
-            asm volatile ("vmread %[field], %[ret]"
-                : [ret] "=rm" (ret),
-                : [field] "r" (0x00004400),
-            );
-            debug.printf("vmptrld failiure error code: {d}", .{ret});
+            debug.printf("vmptrld failiure error code: {d}\n", .{vmerr()});
         }
         return error.vmtprld_failed;
     }
@@ -160,9 +147,77 @@ pub fn allocVmcsRegion() !void {
     guest_state.vmcs_region = vmcs_region_phys;
 }
 
-pub fn terminateVmx() void {
+pub fn vmxoff() void {
     std.log.info("terminating vmx...\n", .{});
     asm volatile ("vmxoff");
+}
+
+/// FIXME: I didn't test it acutally works.
+///
+/// calls vmclear with the vmxon ptr.
+///  returns if failed or succeeded
+pub fn clearVmcs(vmstate: *VMState) bool {
+    var cf: u8 = undefined;
+    var zf: u8 = undefined;
+
+    asm volatile (
+        \\ vmclear (%[vmcs_phys_ptr])
+        \\ setc %[cf]
+        \\ setz %[zf]
+        : [cf] "=qm" (cf),
+          [zf] "=qm" (zf),
+        : [vmcs_phys_ptr] "r" (&vmstate.*.vmcs_region),
+    );
+
+    var failed = false;
+    if (cf != 0) {
+        std.log.err("vmclear failed (cf=1)\n", .{});
+        failed = true;
+    }
+
+    if (zf != 0) {
+        std.log.err("vmclear failiure error code: {d}\n", .{vmerr()});
+        failed = true;
+    }
+
+    return !failed;
+}
+
+pub fn loadVmcs(vmstate: *VMState) bool {
+    var cf: u8 = undefined;
+    var zf: u8 = undefined;
+
+    asm volatile (
+        \\ vmptrld (%[vmcs_phys_ptr])
+        \\ setc %[cf]
+        \\ setz %[zf]
+        : [cf] "=qm" (cf),
+          [zf] "=qm" (zf),
+        : [vmcs_phys_ptr] "r" (&vmstate.*.vmcs_region),
+    );
+
+    var failed = false;
+    if (cf != 0) {
+        std.log.err("vmptrld failed (cf=1)\n", .{});
+        failed = true;
+    }
+
+    if (zf != 0) {
+        std.log.err("vmptrld failiure error code: {d}\n", .{vmerr()});
+        failed = true;
+    }
+
+    return !failed;
+}
+
+/// reads the instruction error field to get the error code
+fn vmerr() u64 {
+    var ret: u64 = 0;
+    asm volatile ("vmread %[field], %[ret]"
+        : [ret] "=rm" (ret),
+        : [field] "r" (0x00004400),
+    );
+    return ret;
 }
 
 pub inline fn rdmsr(msr_id: u32) u64 {
