@@ -61,9 +61,19 @@ pub const VMState = extern struct {
     vmcs_region: u64,
     /// phys addr
     eptp: u64,
+    /// stack for vmm in VM-Exit state
+    vmm_stack: u64,
+    /// msr bitmap virt addr
+    msr_bitmap: u64,
+    /// msr bitmap phys addr
+    msr_bitmap_phys: u64,
 };
 
-pub var guest_state: VMState = .{ .vmxon_region = 0, .vmcs_region = 0, .eptp = 0 };
+pub var guest_state: VMState = .{ .vmxon_region = 0, .vmcs_region = 0, .eptp = 0, .msr_bitmap = 0, .msr_bitmap_phys = 0, .vmm_stack = 0 };
+/// holds the address of where our guest code starts
+var guest_mem_addr: u64 = 0;
+
+const hlt_byte: comptime_int = 0xf4;
 
 /// Prepares the VMXON region and executes VMXON.
 pub fn allocVmxonRegion() !void {
@@ -208,6 +218,64 @@ pub fn loadVmcs(vmstate: *VMState) bool {
     }
 
     return !failed;
+}
+
+/// calls vmlaunch.
+/// ret val indicates success of operation
+///
+/// returns either if vmlaunch failed
+/// or when after the VM caused an exit (will block)
+pub fn vmlaunch() bool {
+    var ret: u8 = 69;
+    asm volatile ("call __vmlaunch"
+        : [ret] "={al}" (ret),
+    );
+
+    return ret != 0;
+}
+
+var old_rbp: u64 = 0;
+var old_rsp: u64 = 0;
+
+export fn __vmlaunch() callconv(.naked) u8 {
+    asm volatile (
+        \\ push %rbp
+        \\ mov %rsp, %rbp
+    );
+
+    asm volatile (
+        \\ mov %rbp, %[old_rbp]
+        \\ mov %rsp, %[old_rsp]
+        \\
+        \\ vmlaunch
+        \\
+        \\ call __vmlaunchFailed
+        \\ mov $0, %rax
+        \\ pop %rbp
+        \\ ret
+        : [old_rbp] "=m" (old_rbp),
+          [old_rsp] "=m" (old_rsp),
+        :
+        : .{ .rax = true });
+}
+
+export fn __vmlaunchFailed() callconv(.c) void {
+    std.log.err("vmlaunch failed with error code: {d}\n", .{vmerr()});
+}
+
+/// the back point from a vm exit
+fn __vmlaunchSucceed() callconv(.naked) u8 {
+    asm volatile (
+        \\ mov %[old_rbp], %rbp
+        \\ mov %[old_rsp], %rsp
+        \\
+        \\ mov $1, %rax
+        \\ pop %rbp
+        \\ ret
+        :
+        : [old_rbp] "m" (old_rbp),
+          [old_rsp] "m" (old_rsp),
+    );
 }
 
 /// reads the instruction error field to get the error code

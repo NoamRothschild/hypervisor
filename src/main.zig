@@ -58,6 +58,8 @@ pub fn kmain() !void {
 
     vmx.guest_state.eptp = paging.physAddr(@intFromPtr(try ept.init())).?;
 
+    _ = vmx.vmlaunch();
+
     trap();
 }
 
