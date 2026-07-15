@@ -1,5 +1,6 @@
 const std = @import("std");
 const paging = @import("../arch/x86_64/paging.zig");
+const vmx = @import("vmx.zig");
 // set the 7th bit of PDPTE to map a 1 GB page
 // set the 7th bit of PDE to maps a 2 MB page
 // note that in both scenarios the structure of the entry will differ. look in the intel manual for it.
@@ -65,14 +66,8 @@ inline fn zeroMem(ptr: anytype, comptime elem_t: type) void {
     @memset(ptr.*[0..], @bitCast(@as(ZeroType, 0)));
 }
 
-pub fn init() !*EPTP {
-    // FIXME: we allocate a whole 4KiB region for 8 bytes (ept_ptr).
-    const shared_buf = try paging.alloc4KAligned();
-    // errdefer free(shared_buf)
-    zeroMem(shared_buf, u8);
-
-    const ept_ptr: *EPTP = @ptrCast(&shared_buf[0]);
-
+/// creates a basic page table and populates `eptp` and `eptp_phys` fields of guest_state
+pub fn init(guest_state: *vmx.VMState) !void {
     const pml4: *align(4096) [512]EPT_PML4E = @ptrCast(try paging.alloc4KAligned());
     // errdefer free(pml4)
     zeroMem(pml4, EPT_PML4E);
@@ -92,12 +87,13 @@ pub fn init() !*EPTP {
     pd.*[0] = makeEntry(EPT_PDE, paging.physAddr(@intFromPtr(pt)).?);
     pdpt.*[0] = makeEntry(EPT_PDPTE, paging.physAddr(@intFromPtr(pd)).?);
     pml4.*[0] = makeEntry(EPT_PML4E, paging.physAddr(@intFromPtr(pdpt)).?);
-    ept_ptr.* = EPTP{
+    guest_state.eptp = .{
         .dirty_access_enabled = 1,
         .memory_type = 6, // Write Back
         .page_walk_length = 4 - 1, // 4 tables walked
         .pml4_addr = @truncate(paging.physAddr(@intFromPtr(pml4)).? >> 12),
     };
+    guest_state.eptp_phys = paging.physAddr(@intFromPtr(&guest_state.eptp)).?;
 
     // NOTE: we allocated 10 pages for the guest to use
     // the number 10 is arbitrary. should be dynamic in the future.
@@ -120,6 +116,5 @@ pub fn init() !*EPTP {
         };
     }
 
-    std.log.info("EPT ptr allocated at 0x{x}\n", .{@intFromPtr(ept_ptr)});
-    return ept_ptr;
+    std.log.info("EPT ptr stored inside guest_state\n", .{});
 }

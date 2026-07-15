@@ -3,6 +3,7 @@ const debug = @import("debug.zig");
 const paging = @import("arch/x86_64/paging.zig");
 const vmx = @import("virt/vmx.zig");
 const ept = @import("virt/ept.zig");
+const vmcs = @import("virt/vmcs.zig");
 
 comptime {
     _ = @import("arch/x86_64/entry.zig");
@@ -38,27 +39,53 @@ pub fn kmain() !void {
         trap();
     }
 
-    vmx.enableOperation();
-    std.log.info("vmx enabled\n", .{});
+    const guest_states: *[1]vmx.VMState = @ptrCast(try paging.alloc4KAligned());
 
-    vmx.allocVmxonRegion() catch |err| {
-        std.log.err("VMXON failed: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    // TODO: run this block for each CPU
+    for (guest_states) |*guest_state| {
+        guest_state.* = std.mem.zeroes(vmx.VMState);
 
-    std.log.info("VMXON succeeded\n", .{});
-    defer vmx.vmxoff();
+        vmx.enableOperation();
+        std.log.info("vmx enabled\n", .{});
 
-    vmx.allocVmcsRegion() catch |err| {
-        std.log.err("VMCS allocation or VMPTRLD failed: {s}\n", .{@errorName(err)});
-        return err;
-    };
+        vmx.allocVmxonRegion(guest_state) catch |err| {
+            std.log.err("VMXON failed: {s}\n", .{@errorName(err)});
+            return err;
+        };
 
-    std.log.info("VMPTRLD succeeded\n", .{});
+        std.log.info("VMXON succeeded\n", .{});
+        defer vmx.vmxoff();
 
-    vmx.guest_state.eptp = paging.physAddr(@intFromPtr(try ept.init())).?;
+        vmcs.allocRegion(guest_state) catch |err| {
+            std.log.err("VMCS allocation or VMPTRLD failed: {s}\n", .{@errorName(err)});
+            return err;
+        };
 
-    _ = vmx.vmlaunch();
+        // errors are logged inside the function
+        if (!vmcs.clear(guest_state))
+            return error.clear_vmcs_failed;
+        if (!vmcs.load(guest_state))
+            return error.vmcs_load_failed;
+
+        std.log.info("VMPTRLD succeeded\n", .{});
+
+        try ept.init(guest_state);
+
+        const stack_pages: [1]*[4096]u8 = .{try paging.alloc4KAligned()};
+        guest_state.vmm_stack = stack_pages[0];
+        inline for (stack_pages[0..]) |stack_page| {
+            @memset(stack_page.*[0..], @as(u8, 0));
+        }
+
+        const msr_bitmap_page = try paging.alloc4KAligned();
+        guest_state.msr_bitmap = msr_bitmap_page;
+        guest_state.msr_bitmap_phys = paging.physAddr(@intFromPtr(msr_bitmap_page)).?;
+        @memset(msr_bitmap_page.*[0..], @as(u8, 0));
+
+        _ = vmx.vmlaunch();
+
+        trap();
+    }
 
     trap();
 }
