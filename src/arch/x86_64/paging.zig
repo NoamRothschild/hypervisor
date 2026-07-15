@@ -223,7 +223,7 @@ pub const Allocator4K = struct {
         assert(self.offset < 512);
         assert(self.curr_page != null);
 
-        return self.curr_page.? + (self.offset << 12);
+        return self.curr_page.? + (@as(u64, self.offset) << 12);
     }
 
     pub fn next(self: *@This()) !u64 {

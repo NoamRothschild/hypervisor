@@ -79,8 +79,6 @@ pub const VMState = extern struct {
     guest_mem_addr: u64 = 0,
 };
 
-const hlt_byte: comptime_int = 0xf4;
-
 /// Prepares the VMXON region and executes VMXON.
 pub fn allocVmxonRegion(guest_state: *VMState) !void {
     const vmxon_page = try paging.alloc4KAligned();
@@ -134,26 +132,32 @@ pub fn vmxoff() void {
 /// returns either if vmlaunch failed
 /// or when after the VM caused an exit (will block)
 pub fn vmlaunch() bool {
-    var ret: u8 = 69;
-    asm volatile ("call __vmlaunch"
-        : [ret] "={al}" (ret),
-    );
-
+    const ret = asm volatile ("call __vmlaunch"
+        : [ret] "={al}" (-> u8),
+        :
+        : .{
+          .rcx = true,
+          .rdx = true,
+          .rsi = true,
+          .rdi = true,
+          .r8 = true,
+          .r9 = true,
+          .r10 = true,
+          .r11 = true,
+          .memory = true,
+        });
     return ret != 0;
 }
 
-var old_rbp: u64 = 0;
-var old_rsp: u64 = 0;
+export var old_rbp: u64 = 0;
+export var old_rsp: u64 = 0;
 
-export fn __vmlaunch() callconv(.naked) u8 {
+export fn __vmlaunch() callconv(.naked) void {
     asm volatile (
         \\ push %rbp
         \\ mov %rsp, %rbp
-    );
-
-    asm volatile (
-        \\ mov %rbp, %[old_rbp]
-        \\ mov %rsp, %[old_rsp]
+        \\ mov %rbp, old_rbp(%rip)
+        \\ mov %rsp, old_rsp(%rip)
         \\
         \\ vmlaunch
         \\
@@ -161,29 +165,23 @@ export fn __vmlaunch() callconv(.naked) u8 {
         \\ mov $0, %rax
         \\ pop %rbp
         \\ ret
-        : [old_rbp] "=m" (old_rbp),
-          [old_rsp] "=m" (old_rsp),
-        :
-        : .{ .rax = true });
+        ::: .{ .rax = true, .memory = true });
 }
 
 export fn __vmlaunchFailed() callconv(.c) void {
     std.log.err("vmlaunch failed with error code: {d}\n", .{vmerr()});
 }
 
-/// the back point from a vm exit
-fn __vmlaunchSucceed() callconv(.naked) u8 {
+/// Return to the `call __vmlaunch` site after a handled VM-exit.
+/// must be naked and entered with `jmp` (not `call`) so there is no C prologue.
+export fn __vmReturnSucceed() callconv(.naked) void {
     asm volatile (
-        \\ mov %[old_rbp], %rbp
-        \\ mov %[old_rsp], %rsp
-        \\
+        \\ mov old_rbp(%rip), %rbp
+        \\ mov old_rsp(%rip), %rsp
         \\ mov $1, %rax
         \\ pop %rbp
         \\ ret
-        :
-        : [old_rbp] "m" (old_rbp),
-          [old_rsp] "m" (old_rsp),
-    );
+        ::: .{ .rax = true, .rbp = true, .rsp = true });
 }
 
 pub fn vmExitHandler() callconv(.naked) void {
@@ -204,25 +202,23 @@ pub fn vmExitHandler() callconv(.naked) void {
         \\ push %rdx
         \\ push %rcx
         \\ push %rax
-        ::: .{ .r15 = true, .r14 = true, .r13 = true, .r12 = true, .r11 = true, .r10 = true, .r9 = true, .r8 = true, .rdi = true, .rsi = true, .rbp = true, .rbx = true, .rdx = true, .rcx = true, .rax = true });
-
-    asm volatile (
+        \\
         \\ mov %rsp, %rcx
         \\ sub $0x28, %rsp
         \\ call mainVmExitHandler
         \\ add $0x28, %rsp
-        ::: .{
-            .rcx = true,
-        });
-
-    asm volatile (
+        \\
+        \\ // al=1 => stop and return to kmain; al=0 => resume guest
+        \\ test %al, %al
+        \\ jnz __vmReturnSucceed
+        \\
         \\ pop %rcx
         \\ pop %rdx
         \\ pop %rbx
         \\ pop %rbp
         \\ pop %rbp
         \\ pop %rsi
-        \\ pop %rdi 
+        \\ pop %rdi
         \\ pop %r8
         \\ pop %r9
         \\ pop %r10
@@ -231,12 +227,16 @@ pub fn vmExitHandler() callconv(.naked) void {
         \\ pop %r13
         \\ pop %r14
         \\ pop %r15
-        \\ sub $100, %rsp // to avoid error in future functions
-        \\ jmp vmResumeInstruction
-        ::: .{ .rcx = true, .rdx = true, .rbx = true, .rbp = true, .rsi = true, .rdi = true, .r8 = true, .r9 = true, .r10 = true, .r11 = true, .r12 = true, .r13 = true, .r14 = true, .r15 = true });
+        \\
+        \\ call resumeToNextInstruction
+        \\ vmresume
+        \\
+        \\ call vmResumeInstructionFailed
+    );
 }
 
-export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) void {
+/// Returns true when the VMM should leave the guest and return to kmain.
+export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) bool {
     const exit_reason: ExitReason = @enumFromInt(vmread(.VM_EXIT_REASON) & 0xffff);
     const exit_qualification = vmread(.EXIT_QUALIFICATION);
     _ = guest_regs;
@@ -258,22 +258,28 @@ export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) void {
 
         .hlt => {
             std.log.info("user executed hlt\n", .{});
+            return true;
         },
-
-        else => {},
+        .invalid_guest_state => {
+            std.log.err("invalid guest state; not resuming\n", .{});
+            return true;
+        },
+        else => return false,
     }
+    return false;
 }
 
-export fn vmResumeInstruction() callconv(.c) void {
+export fn resumeToNextInstruction() callconv(.c) void {
     const current_rip = vmread(.GUEST_RIP);
     const exit_instr_len = vmread(.VM_EXIT_INSTRUCTION_LEN);
     vmwrite(.GUEST_RIP, current_rip +% exit_instr_len);
+}
 
-    asm volatile ("vmresume");
-
+export fn vmResumeInstructionFailed() callconv(.c) noreturn {
     std.log.err("vmresume failed with error code: {d}\n", .{vmerr()});
-    // __vmlaunchSucceed();
-    // // ^^ goes back to main loop
+
+    while (true)
+        asm volatile ("hlt");
 }
 
 /// reads the instruction error field to get the error code

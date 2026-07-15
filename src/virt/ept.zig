@@ -95,14 +95,14 @@ pub fn init(guest_state: *vmx.VMState) !void {
     };
     guest_state.eptp_phys = paging.physAddr(@intFromPtr(&guest_state.eptp)).?;
 
+    const hlt_byte: u8 = 0xf4;
+
     // NOTE: we allocated 10 pages for the guest to use
     // the number 10 is arbitrary. should be dynamic in the future.
     var first: bool = true;
     for (0..10) |i| {
         const guest_mem_sect = try paging.alloc4KAligned();
-        zeroMem(guest_mem_sect, u8);
-        // const ZeroType = @Int(.unsigned, @bitSizeOf(u8));
-        // @memset(guest_mem_sect.*[0..], @bitCast(@as(ZeroType, 0)));
+        @memset(guest_mem_sect.*[0..], hlt_byte);
         const phys_addr: u64 = paging.physAddr(@intFromPtr(guest_mem_sect)).?;
         if (first) {
             first = false;

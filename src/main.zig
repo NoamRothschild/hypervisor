@@ -95,7 +95,11 @@ pub fn kmain() !void {
 
         try vmcs.setup(guest_state);
 
-        _ = vmx.vmlaunch();
+        if (vmx.vmlaunch()) {
+            std.log.info("vm launch finished\n", .{});
+        } else {
+            std.log.info("vm launch finished failed\n", .{});
+        }
 
         trap();
     }
