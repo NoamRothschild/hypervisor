@@ -1,5 +1,6 @@
 const std = @import("std");
 const debug = @import("debug.zig");
+const gdt = @import("arch/x86_64/gdt.zig");
 const paging = @import("arch/x86_64/paging.zig");
 const vmx = @import("virt/vmx.zig");
 const ept = @import("virt/ept.zig");
@@ -18,6 +19,12 @@ comptime {
 pub fn kmain() !void {
     kmain_start();
     debug.printf("inside kmain!\n", .{});
+
+    const gdt_info = gdt.gdtInfo();
+    for (0..3) |i| {
+        std.log.info("gdt[{d}] = {}\n", .{ i, gdt.getSegmentDescriptor(@truncate(i << 3), gdt_info.base) });
+    }
+
     for (0..10) |_| {
         const page_addr: [*]usize = @ptrFromInt(paging.allocPage() catch |err| {
             debug.printf("page allocation failed with: {s}\n", .{@errorName(err)});
@@ -72,7 +79,8 @@ pub fn kmain() !void {
         try ept.init(guest_state);
 
         const stack_pages: [1]*[4096]u8 = .{try paging.alloc4KAligned()};
-        guest_state.vmm_stack = stack_pages[0];
+        guest_state.vmm_stack = @ptrCast(stack_pages[0]);
+        guest_state.vmm_stack.len = stack_pages.len * 4096;
         inline for (stack_pages[0..]) |stack_page| {
             @memset(stack_page.*[0..], @as(u8, 0));
         }
@@ -81,6 +89,8 @@ pub fn kmain() !void {
         guest_state.msr_bitmap = msr_bitmap_page;
         guest_state.msr_bitmap_phys = paging.physAddr(@intFromPtr(msr_bitmap_page)).?;
         @memset(msr_bitmap_page.*[0..], @as(u8, 0));
+
+        try vmcs.setup(guest_state);
 
         _ = vmx.vmlaunch();
 

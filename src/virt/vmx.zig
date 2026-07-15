@@ -13,11 +13,11 @@ pub inline fn supportsVirtualization() bool {
     if (debug.getFeatures().vmx != 1)
         return false;
 
-    var fc_msr: msr.IA32_FEATURE_CONTROL = @bitCast(rdmsr(msr.msr.IA32_FEATURE_CONTROL));
+    var fc_msr: msr.IA32_FEATURE_CONTROL = @bitCast(rdmsr(.IA32_FEATURE_CONTROL));
     if (fc_msr.lock == 0) {
         fc_msr.lock = 1;
         fc_msr.enable_vmxon = 1;
-        wrmsr(msr.msr.IA32_FEATURE_CONTROL, @bitCast(fc_msr));
+        wrmsr(.IA32_FEATURE_CONTROL, @bitCast(fc_msr));
     } else if (fc_msr.enable_vmxon == 0) {
         std.log.err("VMX locked off in BIOS", .{});
         return false;
@@ -38,10 +38,10 @@ pub fn enableOperation() void {
         : [cr4] "=r" (cr4),
     );
 
-    const cr0_fixed0 = rdmsr(msr.vt_msrs.IA32_VMX_CR0_FIXED0);
-    const cr0_fixed1 = rdmsr(msr.vt_msrs.IA32_VMX_CR0_FIXED1);
-    const cr4_fixed0 = rdmsr(msr.vt_msrs.IA32_VMX_CR4_FIXED0);
-    const cr4_fixed1 = rdmsr(msr.vt_msrs.IA32_VMX_CR4_FIXED1);
+    const cr0_fixed0 = rdmsr(.IA32_VMX_CR0_FIXED0);
+    const cr0_fixed1 = rdmsr(.IA32_VMX_CR0_FIXED1);
+    const cr4_fixed0 = rdmsr(.IA32_VMX_CR4_FIXED0);
+    const cr4_fixed1 = rdmsr(.IA32_VMX_CR4_FIXED1);
 
     cr0 |= cr0_fixed0;
     cr0 &= cr0_fixed1;
@@ -68,15 +68,16 @@ pub const VMState = extern struct {
     /// phys addr
     eptp_phys: u64,
     /// virt addr, stack for vmm in VM-Exit state
-    vmm_stack: *[4096]u8,
+    vmm_stack: *align(1) []u8,
+    vmm_stack_size: usize,
     /// msr bitmap virt addr
     msr_bitmap: *[4096]u8,
     /// msr bitmap phys addr
     msr_bitmap_phys: u64,
+    /// holds the host virt address of the page allocated to the guest
+    /// NOTE: VMState is special for every CPU for every host. This field is shared between all cpus for the same guest
+    guest_mem_addr: u64 = 0,
 };
-
-/// holds the address of where our guest code starts
-var guest_mem_addr: u64 = 0;
 
 const hlt_byte: comptime_int = 0xf4;
 
@@ -91,7 +92,7 @@ pub fn allocVmxonRegion(guest_state: *VMState) !void {
 
     @memset(vmxon_page, 0);
 
-    const basic = rdmsr(msr.vt_msrs.IA32_VMX_BASIC);
+    const basic = rdmsr(.IA32_VMX_BASIC);
     const revision_identifier: u32 = @truncate(basic);
     std.log.info("IA32_VMX_BASIC revision identifier: 0x{x}\n", .{revision_identifier});
 

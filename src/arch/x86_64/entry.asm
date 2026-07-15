@@ -47,6 +47,7 @@ GDT:
         dw $ - GDT - 1
         dq GDT
 
+global GDT.Pointer
 
 section .text.boot exec alloc
 

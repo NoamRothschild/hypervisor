@@ -37,7 +37,7 @@ const gate_types = struct {
 
 var entries: [0xff]IdtGate = [_]IdtGate{std.mem.zeroes(IdtGate)} ** 0xff;
 
-var idt_descriptor = extern struct {
+pub var idt_descriptor = extern struct {
     limit: u16,
     base: u64 align(1),
 }{

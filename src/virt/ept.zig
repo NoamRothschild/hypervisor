@@ -97,10 +97,15 @@ pub fn init(guest_state: *vmx.VMState) !void {
 
     // NOTE: we allocated 10 pages for the guest to use
     // the number 10 is arbitrary. should be dynamic in the future.
+    var first: bool = true;
     for (0..10) |i| {
         const guest_mem_sect = try paging.alloc4KAligned();
         zeroMem(guest_mem_sect, u8);
         const phys_addr: u64 = paging.physAddr(@intFromPtr(guest_mem_sect)).?;
+        if (first) {
+            first = false;
+            guest_state.guest_mem_addr = @intFromPtr(guest_mem_sect);
+        }
 
         pt.*[i] = EPT_PTE{
             .accessed = 0,
