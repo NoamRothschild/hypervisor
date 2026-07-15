@@ -25,7 +25,7 @@ pub fn kmain() !void {
 
     const gdt_info = gdt.gdtInfo();
     for (0..3) |i| {
-        std.log.info("gdt[{d}] = {}\n", .{ i, gdt.getSegmentDescriptor(@truncate(i << 3), gdt_info.base) });
+        std.log.info("gdt[{d}] = {}\n", .{ i, gdt.getSegmentDescriptor(@truncate(i << 3), gdt_info.base).* });
     }
 
     for (0..10) |_| {

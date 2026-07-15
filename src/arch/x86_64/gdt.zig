@@ -14,6 +14,7 @@ pub const SegmentDescriptor = packed struct(u64) {
     pub fn base(self: *const @This()) u64 {
         var res: u64 = @as(u32, self.base_low) | (@as(u32, self.base_mid) << 16) | (@as(u32, self.base_high) << 24);
         if (!self.isNull() and self.isSystem()) {
+            // must be called on a descriptor that lives in the GDT (next 8 bytes = high base)
             const next_entry = @as([*]const @This(), @ptrCast(self))[1];
             const high: u32 = @truncate(@as(u64, @bitCast(next_entry)));
             res |= @as(u64, high) << 32;
@@ -71,11 +72,12 @@ pub fn gdtInfo() *align(1) GDTP {
     return @ptrFromInt(@intFromPtr(sym));
 }
 
-pub fn getSegmentDescriptor(selector: u16, gdt_base: usize) SegmentDescriptor {
+/// Returns a pointer into the live GDT so `base()` can read the high half of system descriptors.
+pub fn getSegmentDescriptor(selector: u16, gdt_base: usize) *const SegmentDescriptor {
     // selector's index into the GDT
     const index = selector >> 3;
     const table: [*]const SegmentDescriptor = @ptrFromInt(gdt_base);
-    return table[index];
+    return &table[index];
 }
 
 var tss_entry: Tss = .{};
