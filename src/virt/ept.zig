@@ -66,7 +66,7 @@ inline fn zeroMem(ptr: anytype, comptime elem_t: type) void {
     @memset(ptr.*[0..], @bitCast(@as(ZeroType, 0)));
 }
 
-/// creates a basic page table and populates `eptp` and `eptp_phys` fields of guest_state
+/// creates a basic page table and populates `eptp`, `eptp_phys` and `guest_mem_addr` fields of guest_state
 pub fn init(guest_state: *vmx.VMState) !void {
     const pml4: *align(4096) [512]EPT_PML4E = @ptrCast(try paging.alloc4KAligned());
     // errdefer free(pml4)
@@ -101,6 +101,8 @@ pub fn init(guest_state: *vmx.VMState) !void {
     for (0..10) |i| {
         const guest_mem_sect = try paging.alloc4KAligned();
         zeroMem(guest_mem_sect, u8);
+        // const ZeroType = @Int(.unsigned, @bitSizeOf(u8));
+        // @memset(guest_mem_sect.*[0..], @bitCast(@as(ZeroType, 0)));
         const phys_addr: u64 = paging.physAddr(@intFromPtr(guest_mem_sect)).?;
         if (first) {
             first = false;

@@ -20,6 +20,9 @@ pub fn kmain() !void {
     kmain_start();
     debug.printf("inside kmain!\n", .{});
 
+    gdt.initTss();
+    std.log.info("TSS initialized", .{});
+
     const gdt_info = gdt.gdtInfo();
     for (0..3) |i| {
         std.log.info("gdt[{d}] = {}\n", .{ i, gdt.getSegmentDescriptor(@truncate(i << 3), gdt_info.base) });

@@ -43,6 +43,9 @@ GDT:
         .Data.access: db GDT_PRESENT | GDT_NOT_SYS | GDT_RW
         .Data.Flags: db GRAN_4K | SZ_32 | 0xF       ; Flags & Limit (high, bits 16-19)
         .Data.base_hi: db 0
+    .Tss: equ $ - GDT
+        dq 0
+        dq 0
     .Pointer:
         dw $ - GDT - 1
         dq GDT

@@ -2,14 +2,7 @@ const std = @import("std");
 const syscall = @import("syscall.zig");
 const interrupts = @import("interrupts.zig");
 const pic = @import("pic.zig");
-
-/// offsets from the GDT table present inside entry.asm
-pub const gdt_offsets = struct {
-    nulld: usize = 0,
-    kernel_codeseg: usize = 1,
-    kernel_dataseg: usize = 2,
-    // tss: usize = 3,
-}{};
+const gdt_offsets = @import("gdt.zig").gdt_offsets;
 
 pub const SegmentSelector = packed struct {
     rpl: u2,

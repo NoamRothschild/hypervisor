@@ -225,9 +225,10 @@ pub fn setup(vmstate: *VMState) !void {
     vmwrite(.GUEST_RIP, vmstate.guest_mem_addr);
 
     vmwrite(.HOST_RSP, @as(u64, @intFromPtr(vmstate.vmm_stack)) +% vmstate.vmm_stack.len -% 1);
-    const VMExitHandler: *u64 = @ptrFromInt(0xffff0000);
-    // FIXME: ^^ temporary
-    vmwrite(.HOST_RIP, @intFromPtr(VMExitHandler));
+    // const VMExitHandler: *u64 = @ptrFromInt(0xffff800000000000);
+    // // FIXME: ^^ temporary
+    // vmwrite(.HOST_RIP, @intFromPtr(VMExitHandler));
+    vmwrite(.HOST_RIP, @intFromPtr(&debug.getVendor));
 }
 
 /// calls vmwrite for the given selector with the given value
