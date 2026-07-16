@@ -19,10 +19,6 @@ export const multiboot_header: MultiBootHeaderV2 align(4) linksection(".multiboo
 
 /// gets called at the end of entry.asm
 export fn realMode64() linksection(".text.boot") callconv(.c) void {
-    // TODO: set up paging properly.
-    //  use the externed symbols from the linker.ld file like kernel_physical_start, kernel_physical_end
-    paging.init();
-    // paging has to be initialized before idt because idt code lives in unmapped area
     idt.init();
 
     kmain() catch |err| {

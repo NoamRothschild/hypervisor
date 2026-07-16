@@ -20,6 +20,11 @@ pub fn kmain() !void {
     kmain_start();
     debug.printf("inside kmain!\n", .{});
 
+    const rsp = asm volatile ("mov %rsp, %r8"
+        : [rsp] "={r8}" (-> u64),
+    );
+    debug.printf("rsp: 0x{x}\n", .{rsp});
+
     gdt.initTss();
     std.log.info("TSS initialized", .{});
 

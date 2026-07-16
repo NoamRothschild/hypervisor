@@ -52,6 +52,11 @@ GDT:
 
 global GDT.Pointer
 
+section .bss
+stack_start: resb 0x1000 * 10
+stack_top equ $
+higher_half_base equ 0xffffffff80000000
+
 section .text.boot exec alloc
 
 PTE_SIZE equ ENTRY_BYTE_SIZE
@@ -68,6 +73,8 @@ CR0_PG_ENABLE equ 1 << 31
 CR0_NE_ENABLE equ 1 << 5
 
 extern realMode64
+extern paging_init
+
 global _start
 _start:
   [BITS 32]
@@ -157,6 +164,9 @@ realm64:
   mov gs, ax
   mov es, ax
   mov ss, ax
+
+  call paging_init
+  mov rsp, stack_top
 
   call realMode64
   l: hlt

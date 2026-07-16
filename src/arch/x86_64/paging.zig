@@ -114,7 +114,10 @@ const higher_half_base: comptime_int = 0xFFFFFFFF80000000;
 var kernel_pml4_idx: usize linksection(".data.boot") = 0;
 var kernel_pdpt_idx: usize linksection(".data.boot") = 0;
 
-pub fn init() linksection(".text.boot") void {
+comptime {
+    @export(&init, .{ .name = "paging_init" });
+}
+pub fn init() linksection(".text.boot") callconv(.c) void {
     // if an integer overflow happens here, calling @panic would just cause a page fault because the page did not get created
     // it is best to disable it here.
     @setRuntimeSafety(false);
