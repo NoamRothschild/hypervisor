@@ -3,6 +3,7 @@ const paging = @import("../arch/x86_64/paging.zig");
 const ept = @import("ept.zig");
 const msr = @import("msr.zig");
 const debug = @import("../debug.zig");
+const vmcs = @import("vmcs.zig");
 const rdmsr = msr.rdmsr;
 const wrmsr = msr.wrmsr;
 
@@ -77,6 +78,51 @@ pub const VMState = extern struct {
     /// holds the host virt address of the page allocated to the guest
     /// NOTE: VMState is special for every CPU for every host. This field is shared between all cpus for the same guest
     guest_mem_addr: u64 = 0,
+
+    /// initializes the given VMState, as long as
+    /// - calling vmxon
+    /// - setting up the vmcs
+    /// - loading the vmcs into the cpu (vmptrld)
+    /// - initializing a basic EPT
+    pub fn prepare(self: *VMState) !void {
+        self.* = std.mem.zeroes(VMState);
+
+        allocVmxonRegion(self) catch |err| {
+            std.log.err("VMXON failed: {s}\n", .{@errorName(err)});
+            return err;
+        };
+
+        std.log.info("VMXON succeeded\n", .{});
+
+        vmcs.allocRegion(self) catch |err| {
+            std.log.err("VMCS allocation or VMPTRLD failed: {s}\n", .{@errorName(err)});
+            return err;
+        };
+
+        // errors are logged inside the function
+        if (!vmcs.clear(self))
+            return error.clear_vmcs_failed;
+        if (!vmcs.load(self))
+            return error.vmcs_load_failed;
+
+        std.log.info("VMPTRLD succeeded\n", .{});
+
+        try ept.init(self);
+
+        const stack_pages: [1]*[4096]u8 = .{try paging.alloc4KAligned()};
+        self.vmm_stack = @ptrCast(stack_pages[0]);
+        self.vmm_stack.len = stack_pages.len * 4096;
+        inline for (stack_pages[0..]) |stack_page| {
+            @memset(stack_page.*[0..], @as(u8, 0));
+        }
+
+        const msr_bitmap_page = try paging.alloc4KAligned();
+        self.msr_bitmap = msr_bitmap_page;
+        self.msr_bitmap_phys = paging.physAddr(@intFromPtr(msr_bitmap_page)).?;
+        @memset(msr_bitmap_page.*[0..], @as(u8, 0));
+
+        try vmcs.setup(self);
+    }
 };
 
 /// Prepares the VMXON region and executes VMXON.
