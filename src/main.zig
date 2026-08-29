@@ -6,6 +6,7 @@ const vmx = @import("virt/vmx.zig");
 const ept = @import("virt/ept.zig");
 const vmcs = @import("virt/vmcs.zig");
 const mbt2 = @import("arch/x86_64/multiboot2.zig");
+const hhdm = @import("mem/hhdm.zig");
 
 comptime {
     _ = @import("arch/x86_64/entry.zig");
@@ -40,12 +41,15 @@ pub fn kmain() !void {
     }
 
     gdt.initTss();
-    std.log.info("TSS initialized", .{});
+    std.log.info("TSS initialized\n", .{});
 
     const gdt_info = gdt.gdtInfo();
     for (0..3) |i| {
         std.log.info("gdt[{d}] = {}\n", .{ i, gdt.getSegmentDescriptor(@truncate(i << 3), gdt_info.base).* });
     }
+
+    hhdm.init();
+    std.log.info("HHDM initialized\n", .{});
 
     for (0..10) |_| {
         const page_addr: [*]usize = @ptrFromInt(paging.allocPage() catch |err| {

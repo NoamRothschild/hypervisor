@@ -62,6 +62,43 @@ pub const PDPTE = packed struct(u64) {
     }
 };
 
+pub const PDPTE_1GB = packed struct(u64) {
+    p: u1,
+    r_w: u1,
+    u_s: u1,
+    pwt: u1,
+    pcd: u1,
+    a: u1 = 0,
+    d: u1 = 0,
+    ps: u1 = 1,
+    g: u1,
+    avl1: u3 = 0,
+    pat: u1,
+    rsvd: u17 = 0,
+    /// this is phys addr truncated (physical >> 30)
+    /// stores the physical addr in RAM
+    phys_addr: u22,
+    avl2: u7 = 0,
+    pk: u4,
+    xd: u1,
+
+    pub fn kernel_page(phys_addr: u22) linksection(".text.boot") @This() {
+        return PDPTE_1GB{
+            .p = 1,
+            .ps = 1,
+            .r_w = 1,
+            .u_s = 0,
+            .pwt = 0,
+            .pcd = 0,
+            .pat = 0,
+            .g = 0,
+            .pk = 0,
+            .phys_addr = @truncate(phys_addr),
+            .xd = 0,
+        };
+    }
+};
+
 pub const PDE = packed struct(u64) {
     p: u1,
     r_w: u1,
@@ -102,13 +139,13 @@ pub const PDE = packed struct(u64) {
 extern var kernel_physical_start: u8;
 extern var kernel_size_in_4KIB_pages: u8;
 
-extern var PML4T: [512]PML4E align(0x1000) linksection(".bss.boot");
+pub extern var PML4T: [512]PML4E align(0x1000) linksection(".bss.boot");
 
 var kernelPDPT: [512]PDPTE align(0x1000) linksection(".bss.boot") = undefined;
 var kernelPD: [512]PDE align(0x1000) linksection(".bss.boot") = undefined;
 var last_allocated_kernel_directory_page: usize linksection(".bss.boot") = 0;
 
-const higher_half_base: comptime_int = 0xFFFFFFFF80000000;
+pub const higher_half_base: comptime_int = 0xFFFFFFFF80000000;
 
 // initialized after .init()
 var kernel_pml4_idx: usize linksection(".data.boot") = 0;
@@ -152,10 +189,19 @@ pub fn init() linksection(".text.boot") callconv(.c) void {
     // only update PML4 once everything is set up
     PML4T[kernel_pml4_idx] = PML4E.kernel_page(@intFromPtr(&kernelPDPT));
 
+    refreshCr3();
+}
+
+pub inline fn refreshCr3() linksection(".text.boot") void {
     asm volatile (
         \\ mov %%cr3, %%rax
         \\ mov %%rax, %%cr3
         ::: .{ .rax = true, .memory = true });
+}
+
+/// reverse the effect of |'ing with the higher half base
+pub fn physAddrOfKernelVar(ptr: *anyopaque) u64 {
+    return @intFromPtr(ptr) & ~@as(u64, higher_half_base);
 }
 
 /// allocates and returns an aligned virtual addr of a free 2MiB page.
