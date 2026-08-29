@@ -5,6 +5,7 @@ const paging = @import("arch/x86_64/paging.zig");
 const vmx = @import("virt/vmx.zig");
 const ept = @import("virt/ept.zig");
 const vmcs = @import("virt/vmcs.zig");
+const mbt2 = @import("arch/x86_64/multiboot2.zig");
 
 comptime {
     _ = @import("arch/x86_64/entry.zig");
@@ -24,6 +25,19 @@ pub fn kmain() !void {
         : [rsp] "={r8}" (-> u64),
     );
     debug.printf("rsp: 0x{x}\n", .{rsp});
+
+    debug.printf("mbt2 magic: 0x{x}\n", .{mbt2.magic});
+    if (mbt2.magic != mbt2.bootloader_magic) {
+        @panic("invalid multiboot2 magic number!");
+    }
+
+    const mmap_tag = mbt2.findTag(.mmap) orelse @panic("unable to find mmap tag in mb2 hdr");
+
+    debug.printf("mmap entries:\n", .{});
+    var mmap_it: mbt2.MMAPIterator = .init(@ptrCast(@alignCast(mmap_tag)));
+    while (mmap_it.next()) |mmap_entry| {
+        debug.printf("mmap entry: {}\n", .{mmap_entry});
+    }
 
     gdt.initTss();
     std.log.info("TSS initialized", .{});

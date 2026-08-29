@@ -12,6 +12,11 @@ pub const MultiBootHeaderV2 = extern struct {
     arch: u32 = grub_multiboot_architecture_i386,
     len: u32 = @sizeOf(MultiBootHeaderV2),
     checksum: u32 = 0x100000000 - (multiboot2_header_magic + grub_multiboot_architecture_i386 + @sizeOf(MultiBootHeaderV2)),
+    info_req_type: u16 align(8) = 1,
+    info_req_flags: u16 = 0,
+    info_req_size: u32 = 16,
+    info_req_mmap: u32 = 6,
+    info_req_padding: u32 = 0,
     end_tag: u64 = 8 << 32,
 };
 

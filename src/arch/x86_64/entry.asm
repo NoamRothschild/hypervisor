@@ -75,11 +75,17 @@ CR0_NE_ENABLE equ 1 << 5
 extern realMode64
 extern paging_init
 
+extern mbd_raw
+extern mbt2_magic
+
 global _start
 _start:
   [BITS 32]
   ; TODO: check for existence of CPUID, if exists check for long mode support
   ; for now we assume they both exist
+
+  mov dword [mbd_raw], ebx
+  mov dword [mbt2_magic], eax
 
   mov edi, PML4T
   mov cr3, edi
