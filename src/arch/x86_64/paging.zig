@@ -31,6 +31,12 @@ pub const PML4E = packed struct(u64) {
         };
     }
 
+    pub inline fn initNotPresent() linksection(".text.boot") @This() {
+        var entry: @This() = @bitCast(@as(u64, undefined));
+        entry.setPresent(false);
+        return entry;
+    }
+
     // NOTE: idk if I like this or not yet
     pub inline fn present(self: *const @This()) linksection(".text.boot") bool {
         return self.p != 0;
@@ -38,6 +44,10 @@ pub const PML4E = packed struct(u64) {
 
     pub inline fn setPresent(self: *@This(), is_present: bool) linksection(".text.boot") void {
         self.p = @intFromBool(is_present);
+    }
+
+    pub inline fn physAddr(self: *const @This()) linksection(".text.boot") u64 {
+        return @as(u64, self.phys_addr) << 12;
     }
 };
 
@@ -59,16 +69,20 @@ pub const PDPTE = packed union(u64) {
         avl3: u11 = 0,
         xd: u1,
 
-        pub fn kernel_page(phys_addr: u64) linksection(".text.boot") @This() {
+        pub fn kernel_page(phys_addr: u40) linksection(".text.boot") @This() {
             return .{
                 .p = 1,
                 .r_w = 1,
                 .u_s = 0,
                 .pwt = 0,
                 .pcd = 0,
-                .phys_addr = @truncate(phys_addr >> 12),
+                .phys_addr = phys_addr,
                 .xd = 0,
             };
+        }
+
+        pub inline fn physAddr(self: *const @This()) linksection(".text.boot") u64 {
+            return @as(u64, self.phys_addr) << 12;
         }
     },
     @"1 GB": packed struct(u64) {
@@ -102,17 +116,27 @@ pub const PDPTE = packed union(u64) {
                 .pat = 0,
                 .g = 0,
                 .pk = 0,
-                .phys_addr = @truncate(phys_addr),
+                .phys_addr = phys_addr,
                 .xd = 0,
             };
+        }
+
+        pub inline fn physAddr(self: *const @This()) linksection(".text.boot") u64 {
+            return @as(u64, self.phys_addr) << 30;
         }
     },
 
     pub fn kernel_page(comptime tag: enum { PD, @"1 GB" }, phys_addr: u64) linksection(".text.boot") @This() {
         return switch (tag) {
-            .PD => .{ .PD = .kernel_page(phys_addr) },
-            .@"1 GB" => .{ .@"1 GB" = .kernel_page(@truncate(phys_addr)) },
+            .PD => .{ .PD = .kernel_page(@truncate(phys_addr >> 12)) },
+            .@"1 GB" => .{ .@"1 GB" = .kernel_page(@truncate(phys_addr >> 30)) },
         };
+    }
+
+    pub inline fn initNotPresent() linksection(".text.boot") @This() {
+        var entry: @This() = @bitCast(@as(u64, undefined));
+        entry.setPresent(false);
+        return entry;
     }
 
     // NOTE: idk if I like this or not yet
@@ -123,10 +147,17 @@ pub const PDPTE = packed union(u64) {
     pub inline fn setPresent(self: *@This(), is_present: bool) linksection(".text.boot") void {
         self.PD.p = @intFromBool(is_present);
     }
+
+    pub inline fn physAddr(self: *const @This(), comptime tag: enum { PD, @"1 GB" }) linksection(".text.boot") u64 {
+        return switch (tag) {
+            .PD => self.PD.physAddr(),
+            .@"1 GB" => self.@"1 GB".physAddr(),
+        };
+    }
 };
 
 pub const PDE = packed union(u64) {
-    @"4 KB": packed struct(u64) {
+    PT: packed struct(u64) {
         p: u1,
         r_w: u1,
         u_s: u1,
@@ -143,16 +174,20 @@ pub const PDE = packed union(u64) {
         avl3: u11 = 0,
         xd: u1,
 
-        pub fn kernel_page(phys_addr: u64) linksection(".text.boot") @This() {
+        pub fn kernel_page(phys_addr: u40) linksection(".text.boot") @This() {
             return .{
                 .p = 1,
                 .r_w = 1,
                 .u_s = 0,
                 .pwt = 0,
                 .pcd = 0,
-                .phys_addr = @truncate(phys_addr >> 12),
+                .phys_addr = phys_addr,
                 .xd = 0,
             };
+        }
+
+        pub inline fn physAddr(self: *const @This()) linksection(".text.boot") u64 {
+            return @as(u64, self.phys_addr) << 12;
         }
     },
     @"2 MB": packed struct(u64) {
@@ -190,22 +225,39 @@ pub const PDE = packed union(u64) {
                 .xd = 0,
             };
         }
+
+        pub inline fn physAddr(self: *const @This()) linksection(".text.boot") u64 {
+            return @as(u64, self.phys_addr) << 21;
+        }
     },
 
-    pub fn kernel_page(comptime page_size: enum { @"4 KB", @"2 MB" }, phys_addr: u64) linksection(".text.boot") @This() {
-        return switch (page_size) {
-            .@"4 KB" => .{ .@"4 KB" = .kernel_page(phys_addr) },
-            .@"2 MB" => .{ .@"2 MB" = .kernel_page(@truncate(phys_addr)) },
+    pub fn kernel_page(comptime tag: enum { PT, @"2 MB" }, phys_addr: u64) linksection(".text.boot") @This() {
+        return switch (tag) {
+            .PT => .{ .PT = .kernel_page(@truncate(phys_addr >> 12)) },
+            .@"2 MB" => .{ .@"2 MB" = .kernel_page(@truncate(phys_addr >> 21)) },
         };
+    }
+
+    pub inline fn initNotPresent() linksection(".text.boot") @This() {
+        var entry: @This() = @bitCast(@as(u64, undefined));
+        entry.setPresent(false);
+        return entry;
     }
 
     // NOTE: idk if I like this or not yet
     pub inline fn present(self: *const @This()) linksection(".text.boot") bool {
-        return self.@"4 KB".p != 0;
+        return self.PT.p != 0;
     }
 
     pub inline fn setPresent(self: *@This(), is_present: bool) linksection(".text.boot") void {
-        self.@"4 KB".p = @intFromBool(is_present);
+        self.PT.p = @intFromBool(is_present);
+    }
+
+    pub inline fn physAddr(self: *const @This(), comptime tag: enum { PT, @"2 MB" }) linksection(".text.boot") u64 {
+        return switch (tag) {
+            .PT => self.PT.physAddr(),
+            .@"2 MB" => self.@"2 MB".physAddr(),
+        };
     }
 };
 
@@ -242,6 +294,12 @@ pub const PTE = packed struct(u64) {
         };
     }
 
+    pub inline fn initNotPresent() linksection(".text.boot") @This() {
+        var entry: @This() = @bitCast(@as(u64, undefined));
+        entry.setPresent(false);
+        return entry;
+    }
+
     // NOTE: idk if I like this or not yet
     pub inline fn present(self: *const @This()) linksection(".text.boot") bool {
         return self.p != 0;
@@ -250,11 +308,15 @@ pub const PTE = packed struct(u64) {
     pub inline fn setPresent(self: *@This(), is_present: bool) linksection(".text.boot") void {
         self.p = @intFromBool(is_present);
     }
+
+    pub inline fn physAddr(self: *const @This()) linksection(".text.boot") u64 {
+        return @as(u64, self.phys_addr) << 12;
+    }
 };
 
 pub const PDPTE_PD = @TypeOf(@as(PDPTE, @bitCast(@as(u64, 0))).PD);
 pub const PDPTE_1GB = @TypeOf(@as(PDPTE, @bitCast(@as(u64, 0))).@"1 GB");
-pub const PDE_4KB = @TypeOf(@as(PDE, @bitCast(@as(u64, 0))).@"4 KB");
+pub const PDE_4KB = @TypeOf(@as(PDE, @bitCast(@as(u64, 0))).PT);
 pub const PDE_2MB = @TypeOf(@as(PDE, @bitCast(@as(u64, 0))).@"2 MB");
 
 extern var kernel_physical_start: u8;
@@ -282,9 +344,9 @@ pub fn init() linksection(".text.boot") callconv(.c) void {
 
     // setting up kernel tables
     for (&kernelPDPT) |*e|
-        e.* = @bitCast(@as(u64, 0));
+        e.* = .initNotPresent();
     for (&kernelPD) |*e|
-        e.* = @bitCast(@as(u64, 0));
+        e.* = @bitCast(PDE.initNotPresent());
 
     const kernel_physical_start_addr: u64 = @intFromPtr(&kernel_physical_start);
     const kernel_size_in_4KIB_pages_count: usize = @intFromPtr(&kernel_size_in_4KIB_pages);
