@@ -405,6 +405,10 @@ pub fn allocPage() !u64 {
     return (new_pd_idx << 21) | (kernel_pdpt_idx << 30) | (kernel_pml4_idx << 39) | (0xffff << 48);
 }
 
+pub fn bumpBoundary() u64 {
+    return (last_allocated_kernel_directory_page + 1) << 21;
+}
+
 pub fn unmapPage(virt_addr: u64) void {
     const pml4_idx: usize = (virt_addr >> 39) & 0x1ff;
     const pdpt_idx: usize = (virt_addr >> 30) & 0x1ff;

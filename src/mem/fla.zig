@@ -53,6 +53,66 @@ pub fn reset(self: *Self) void {
     self.used = 0;
 }
 
+/// Permanently excludes `data[offset..][0..len]` from ever being handed out
+/// by `alloc`, by carving it out of the free list directly (no header is
+/// written),
+/// A reserved range can never be passed to `free`.
+/// `offset`/`len` are relative to `data.ptr`, not absolute addrs;
+pub fn reserve(self: *Self, offset: usize, len: usize) void {
+    if (len == 0 or offset >= self.data.len) return;
+    const clip_len = @min(len, self.data.len - offset);
+
+    const base = @intFromPtr(self.data.ptr);
+    const res_start = base + offset;
+    const res_end = res_start + clip_len;
+
+    var prev: ?*Node = null;
+    var node = self.head;
+    while (node) |n| {
+        const n_start = @intFromPtr(n);
+        const n_end = n_start + n.block_size;
+        const next = n.next;
+        defer node = next;
+
+        if (res_end <= n_start or n_end <= res_start) {
+            prev = n;
+            continue;
+        }
+
+        const overlap_start = @max(res_start, n_start);
+        const overlap_end = @min(res_end, n_end);
+
+        // A kept remainder must still fit a `Node`, and a new node's start
+        // address must stay `min_alignment`-aligned (see `min_alignment`'s
+        // doc comment) -- so slivers too small for either get folded into
+        // the reservation rather than kept as unusable or unsafe free nodes.
+        var head_len = overlap_start - n_start;
+        if (head_len < @sizeOf(Node)) head_len = 0;
+
+        var tail_start = min_alignment.forward(overlap_end);
+        if (tail_start >= n_end or n_end - tail_start < @sizeOf(Node)) tail_start = n_end;
+        const tail_len = n_end - tail_start;
+
+        if (head_len == 0 and tail_len == 0) {
+            self.removeNode(prev, n);
+        } else if (head_len == 0) {
+            const moved: *Node = @ptrFromInt(tail_start);
+            moved.* = .{ .next = next, .block_size = tail_len };
+            if (prev) |p| p.next = moved else self.head = moved;
+            prev = moved;
+        } else if (tail_len == 0) {
+            n.block_size = head_len;
+            prev = n;
+        } else {
+            n.block_size = head_len;
+            const tail: *Node = @ptrFromInt(tail_start);
+            tail.* = .{ .next = next, .block_size = tail_len };
+            n.next = tail;
+            prev = n;
+        }
+    }
+}
+
 pub fn allocator(self: *Self) Allocator {
     return .{
         .ptr = self,
@@ -344,4 +404,82 @@ test "alloc returns OutOfMemory once the buffer is exhausted" {
     const a = fla.allocator();
 
     try std.testing.expectError(Allocator.Error.OutOfMemory, a.alloc(u8, 4096));
+}
+
+test "reserve removes an entirely-reserved buffer" {
+    var buf: [64]u8 align(@alignOf(Node)) = undefined;
+    var fla: Self = .init(&buf, .first_fit);
+    fla.reserve(0, buf.len);
+
+    const a = fla.allocator();
+    try std.testing.expectError(Allocator.Error.OutOfMemory, a.alloc(u8, 1));
+}
+
+test "reserve truncates the front of a free node" {
+    var buf: [1024]u8 align(@alignOf(Node)) = undefined;
+    var fla: Self = .init(&buf, .first_fit);
+    fla.reserve(0, 64);
+
+    const a = fla.allocator();
+    const p = try a.alloc(u8, 900);
+    try std.testing.expect(@intFromPtr(p.ptr) >= @intFromPtr(&buf) + 64);
+}
+
+test "reserve truncates the tail of a free node" {
+    var buf: [1024]u8 align(@alignOf(Node)) = undefined;
+    var fla: Self = .init(&buf, .first_fit);
+    fla.reserve(900, 124);
+
+    const a = fla.allocator();
+    _ = try a.alloc(u8, 800);
+    try std.testing.expectError(Allocator.Error.OutOfMemory, a.alloc(u8, 200));
+}
+
+test "reserve punches a hole, splitting a free node into two islands" {
+    var buf: [1024]u8 align(@alignOf(Node)) = undefined;
+    var fla: Self = .init(&buf, .first_fit);
+    fla.reserve(400, 200); // reserve [400, 600), both 8-aligned already
+
+    const a = fla.allocator();
+    const front = try a.alloc(u8, 300);
+    const back = try a.alloc(u8, 300);
+
+    const base = @intFromPtr(&buf);
+    try std.testing.expect(@intFromPtr(front.ptr) < base + 400);
+    try std.testing.expect(@intFromPtr(back.ptr) >= base + 600);
+}
+
+test "reserve is a no-op for out-of-range or already-reserved bytes" {
+    var buf: [256]u8 align(@alignOf(Node)) = undefined;
+    var fla: Self = .init(&buf, .first_fit);
+
+    fla.reserve(1000, 64); // entirely out of bounds
+    fla.reserve(200, 100); // partially out of bounds, clipped to [200, 256)
+    fla.reserve(200, 56); // same range again: already reserved, no-op
+
+    const a = fla.allocator();
+    // exactly fills the [0, 200) island once header overhead is accounted for.
+    const p = try a.alloc(u8, 180);
+    try std.testing.expect(@intFromPtr(p.ptr) + 180 <= @intFromPtr(&buf) + 200);
+    try std.testing.expectError(Allocator.Error.OutOfMemory, a.alloc(u8, 10));
+}
+
+test "reserve mirrors carving unusable regions out of an mmap-derived buffer" {
+    // simulates: reserve()-ing every non-`mem_available` mmap entry over the
+    // low part of a buffer, mirroring the bootloader-mmap usecase.
+    var buf: [2048]u8 align(@alignOf(Node)) = undefined;
+    var fla: Self = .init(&buf, .first_fit);
+
+    const reserved_regions = [_][2]usize{
+        .{ 0, 64 }, // e.g. real-mode IVT / BDA
+        .{ 512, 64 }, // e.g. ACPI tables
+        .{ 1024, 1024 }, // e.g. everything past the usable region
+    };
+    for (reserved_regions) |r| fla.reserve(r[0], r[1]);
+
+    const a = fla.allocator();
+    // usable islands left: [64, 512) and [576, 1024), 448 bytes each.
+    _ = try a.alloc(u8, 300);
+    _ = try a.alloc(u8, 300);
+    try std.testing.expectError(Allocator.Error.OutOfMemory, a.alloc(u8, 300));
 }

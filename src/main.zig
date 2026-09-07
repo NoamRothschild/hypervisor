@@ -7,6 +7,7 @@ const ept = @import("virt/ept.zig");
 const vmcs = @import("virt/vmcs.zig");
 const mbt2 = @import("arch/x86_64/multiboot2.zig");
 const hhdm = @import("mem/hhdm.zig");
+const mem_allocator = @import("mem/allocator.zig");
 
 comptime {
     _ = @import("arch/x86_64/entry.zig");
@@ -50,6 +51,15 @@ pub fn kmain() !void {
 
     hhdm.init();
     std.log.info("HHDM initialized\n", .{});
+
+    const kallocator = mem_allocator.init();
+    std.log.info("kernel allocator initialized\n", .{});
+
+    var node: @TypeOf(kallocator.fla.head) = kallocator.fla.head;
+    while (node) |n| {
+        defer node = n.next;
+        debug.printf("fla allocator block free of size: {d:.2}KB\n", .{@as(f64, @floatFromInt(n.block_size)) / (1 << 20)});
+    }
 
     for (0..10) |_| {
         const page_addr: [*]usize = @ptrFromInt(paging.allocPage() catch |err| {

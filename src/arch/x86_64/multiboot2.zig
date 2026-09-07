@@ -133,4 +133,8 @@ pub const MMAPIterator = struct {
 
         return self.curr_entry;
     }
+
+    pub fn reset(self: *Self) void {
+        self.curr_entry = &self.mmap_tag.entries()[0];
+    }
 };
