@@ -17,6 +17,14 @@ fn addNasmFile(b: *std.Build, kernel: *std.Build.Step.Compile, source_path: []co
     kernel.step.dependOn(&nasm_command.step);
 }
 
+fn addMemOverride(b: *std.Build, cmd_default: []const []const u8, override: []const u8) []const []const u8 {
+    const arr = b.allocator.alloc([]const u8, cmd_default.len + 2) catch @panic("OOM");
+    @memcpy(arr[0..cmd_default.len], cmd_default);
+    arr[cmd_default.len] = "-m";
+    arr[cmd_default.len + 1] = override;
+    return arr;
+}
+
 pub fn build(b: *std.Build) void {
     const wf = b.addWriteFiles();
     var disabled_features: std.Target.Cpu.Feature.Set = .empty;
@@ -92,8 +100,13 @@ pub fn build(b: *std.Build) void {
         default_step.dependOn(step);
     }
 
+    const default_mem = "8G,maxmem=24G";
+    const mem_override = b.option([]const u8, "mem", "Example Value: `16G`; The amount of memory passed into the virtualized system inside QEMU (default=`" ++ default_mem ++ "`)") orelse default_mem;
+
     {
-        const run_qemu = b.addSystemCommand(&[_][]const u8{ "qemu-system-x86_64", "-cdrom", out_iso, "-serial", "stdio", "-enable-kvm", "-cpu", "host,vmx=on" });
+        const cmd = addMemOverride(b, &[_][]const u8{ "qemu-system-x86_64", "-cdrom", out_iso, "-serial", "stdio", "-enable-kvm", "-cpu", "host,vmx=on" }, mem_override);
+        defer b.allocator.free(cmd);
+        const run_qemu = b.addSystemCommand(cmd);
         const qemu_step = b.step("run", "compile & launch qemu");
 
         qemu_step.dependOn(default_step);
@@ -104,7 +117,9 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        const run_qemu = b.addSystemCommand(&[_][]const u8{ "qemu-system-x86_64", "-cdrom", out_iso, "-s", "-S", "-serial", "stdio", "-enable-kvm", "-cpu", "host,vmx=on" });
+        const cmd = addMemOverride(b, &[_][]const u8{ "qemu-system-x86_64", "-cdrom", out_iso, "-s", "-S", "-serial", "stdio", "-enable-kvm", "-cpu", "host,vmx=on" }, mem_override);
+        defer b.allocator.free(cmd);
+        const run_qemu = b.addSystemCommand(cmd);
         const qemu_step = b.step("debug", "compile & launch qemu with a debugger");
 
         qemu_step.dependOn(default_step);
