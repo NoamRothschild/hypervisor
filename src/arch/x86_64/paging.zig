@@ -1,5 +1,3 @@
-const std = @import("std");
-const assert = std.debug.assert;
 // This allows a processor to map 48-bit virtual addresses to 52-bit physical addresses.
 
 pub const PML4E = packed struct(u64) {
@@ -387,94 +385,6 @@ pub fn physAddrOfKernelVar(ptr: *anyopaque) u64 {
     return @intFromPtr(ptr) & ~@as(u64, higher_half_base);
 }
 
-/// allocates and returns an aligned virtual addr of a free 2MiB page.
-///  virtual addr lives inside the higher half mapping
-///
-/// TODO: move page allocation into a different pml4e / pdpte,
-/// use a StaticBitSet instead of the last allocated mechanism
-pub fn allocPage() !u64 {
-    if (last_allocated_kernel_directory_page + 1 >= kernelPD.len)
-        return error.PageDirectoryFull;
-
-    const last_allocated_phys = kernelPD[last_allocated_kernel_directory_page].phys_addr;
-    last_allocated_kernel_directory_page +%= 1;
-
-    const new_pd_idx = last_allocated_kernel_directory_page;
-    kernelPD[new_pd_idx] = .kernel_page(last_allocated_phys +% 1);
-
-    return (new_pd_idx << 21) | (kernel_pdpt_idx << 30) | (kernel_pml4_idx << 39) | (0xffff << 48);
-}
-
 pub fn bumpBoundary() u64 {
     return (last_allocated_kernel_directory_page + 1) << 21;
-}
-
-pub fn unmapPage(virt_addr: u64) void {
-    const pml4_idx: usize = (virt_addr >> 39) & 0x1ff;
-    const pdpt_idx: usize = (virt_addr >> 30) & 0x1ff;
-    const pd_idx: usize = (virt_addr >> 21) & 0x1ff;
-
-    if (pml4_idx != kernel_pml4_idx)
-        @panic("tried to unmap a page inside a pml4e that is not the kernel pml4e");
-
-    if (pdpt_idx != kernel_pdpt_idx)
-        @panic("tried to unmap a page inside a pdpte that is not the kernel pdpte");
-
-    if (kernelPD[pd_idx].p == 0)
-        @panic("tried to unmap a page with present already set to false");
-
-    kernelPD[pd_idx].p = 0;
-}
-
-/// returns the physical addr of virt_addr if found, else null.
-/// only looks up from addesses received from alloc_page()
-/// assumes inside a 2 MiB page.
-pub fn physAddr(virt_addr: u64) ?u64 {
-    const pml4_idx: usize = (virt_addr >> 39) & 0x1ff;
-    const pdpt_idx: usize = (virt_addr >> 30) & 0x1ff;
-    const pd_idx: usize = (virt_addr >> 21) & 0x1ff;
-
-    if (pml4_idx != kernel_pml4_idx)
-        return null;
-
-    if (pdpt_idx != kernel_pdpt_idx)
-        return null;
-
-    // if (kernelPD[pd_idx].ps = 0) // PT with 4KiB entries
-    return (kernelPD[pd_idx].phys_addr << 21) | (virt_addr & 0x1f_ffff);
-}
-
-pub const Allocator4K = struct {
-    curr_page: ?u64 = null,
-    offset: u16 = 0,
-
-    pub const empty = Allocator4K{};
-
-    pub fn init(self: *@This()) !void {
-        self.curr_page = try allocPage();
-        self.offset = 0;
-    }
-
-    pub fn curr(self: *@This()) u64 {
-        assert(self.offset < 512);
-        assert(self.curr_page != null);
-
-        return self.curr_page.? + (@as(u64, self.offset) << 12);
-    }
-
-    pub fn next(self: *@This()) !u64 {
-        defer self.offset += 1;
-        if (self.offset == 512 or self.curr_page == null)
-            try self.init();
-
-        return self.curr();
-    }
-};
-
-var alloc_4k_aligned_state: Allocator4K = .empty;
-
-/// allocates and returns an aligned virtual addr of a free 4KiB page.
-///  virtual addr lives inside the higher half mapping
-pub fn alloc4KAligned() !*align(4096) [4096]u8 {
-    return @ptrFromInt(try alloc_4k_aligned_state.next());
 }

@@ -2,7 +2,8 @@ const std = @import("std");
 const vmx = @import("vmx.zig");
 const msr = @import("msr.zig");
 const debug = @import("../debug.zig");
-const paging = @import("../arch/x86_64/paging.zig");
+const hhdm = @import("../mem/hhdm.zig");
+const mem_allocator = @import("../mem/allocator.zig");
 const gdt = @import("../arch/x86_64/gdt.zig");
 const idt = @import("../arch/x86_64/idt.zig");
 const VMState = vmx.VMState;
@@ -12,9 +13,9 @@ const vmwrite = vmx.vmwrite;
 
 /// Prepares the VMCS region and executes VMPTRLD.
 pub fn allocRegion(guest_state: *VMState) !void {
-    const vmcs_page = try paging.alloc4KAligned();
+    const vmcs_page = try mem_allocator.kalloc.allocPage();
     const vmcs_virt = @intFromPtr(vmcs_page);
-    const vmcs_region_phys = paging.physAddr(vmcs_virt) orelse return error.vmcs_region_not_mapped;
+    const vmcs_region_phys = hhdm.physOf(vmcs_page);
 
     std.log.info("virtual buff addr for VMCS at 0x{x}\n", .{vmcs_virt});
     std.log.info("physical buff addr for VMCS at 0x{x}\n", .{vmcs_region_phys});

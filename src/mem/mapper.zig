@@ -3,38 +3,23 @@ const debug = @import("../debug.zig");
 const assert = std.debug.assert;
 const hhdm = @import("hhdm.zig");
 const paging = @import("../arch/x86_64/paging.zig");
-const page_allocator = @import("page_allocator.zig");
+const allocator = @import("allocator.zig");
+const mem_allocator = @import("allocator.zig");
 
-const PhysAddr = page_allocator.PhysAddr;
-const VirtAddr = page_allocator.VirtAddr;
-const PageSize = page_allocator.PageSize;
+const PhysAddr = allocator.PhysAddr;
+const VirtAddr = allocator.VirtAddr;
 
-/// TEMPORARY. will be replaced by page_allocator.PageAllocator when it will be done.
-pub const DumbAllocator = struct {
-    pub fn alloc(_: *DumbAllocator, ps: PageSize) PhysAddr {
-        if (ps != .@"4 KB")
-            @panic("unimplemented");
-
-        return paging.physAddrOfKernelVar(
-            paging.alloc4KAligned() catch @panic("OOM"),
-        );
-    }
-
-    pub fn reserve(_: *DumbAllocator, start: PhysAddr, end: PhysAddr) void {
-        _ = start;
-        _ = end;
-    }
-
-    pub fn free(_: *DumbAllocator, _: PhysAddr, _: PageSize) void {
-        @panic("unimplemented");
-    }
+pub const PageSize = enum {
+    @"1 GB",
+    @"2 MB",
+    @"4 KB",
 };
 
-pub const Error = error{};
+pub const Error = std.mem.Allocator.Error;
 
 pub const Mapper = struct {
-    /// responsible for marking regions in memory as "used" in its internal datastrucutre.
-    allocator: *DumbAllocator,
+    /// hands out the 4KB pages backing every table this mapper creates
+    allocator: *mem_allocator.KAlloc,
 
     pub fn map(self: *Mapper, vaddr: VirtAddr, paddr: PhysAddr, ps: PageSize, flags: anytype) Error!void {
         _ = flags;
@@ -47,7 +32,7 @@ pub const Mapper = struct {
         defer paging.refreshCr3();
 
         const pdpt: *[512]paging.PDPTE = if (!paging.PML4T[pml4_idx].present()) create_new: {
-            const pdpt_phys = self.allocator.alloc(.@"4 KB");
+            const pdpt_phys = hhdm.physOf(try self.allocator.allocPage());
             const pdpt: *[512]paging.PDPTE = @ptrFromInt(pdpt_phys | hhdm.virt_base);
             for (pdpt) |*e|
                 e.* = .initNotPresent();
@@ -67,7 +52,7 @@ pub const Mapper = struct {
         }
 
         const pd: *[512]paging.PDE = if (!pdpt.*[pdpt_idx].present()) create_new: {
-            const pd_phys = self.allocator.alloc(.@"4 KB");
+            const pd_phys = hhdm.physOf(try self.allocator.allocPage());
             const pd: *[512]paging.PDE = @ptrFromInt(pd_phys | hhdm.virt_base);
             for (pd) |*e|
                 e.* = .initNotPresent();
@@ -87,7 +72,7 @@ pub const Mapper = struct {
         }
 
         const pt: *[512]paging.PTE = if (!pd.*[pd_idx].present()) create_new: {
-            const pt_phys = self.allocator.alloc(.@"4 KB");
+            const pt_phys = hhdm.physOf(try self.allocator.allocPage());
             const pt: *[512]paging.PTE = @ptrFromInt(pt_phys | hhdm.virt_base);
             for (pt) |*e|
                 e.* = .initNotPresent();
@@ -170,7 +155,7 @@ pub const Mapper = struct {
 };
 
 pub fn test1() void {
-    var mapper = Mapper{ .allocator = undefined };
+    var mapper = Mapper{ .allocator = &mem_allocator.kalloc };
     var my_var: u8 = 69;
     const phys_addr_my_var = paging.physAddrOfKernelVar(&my_var);
 

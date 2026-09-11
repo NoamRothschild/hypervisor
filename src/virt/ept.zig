@@ -1,5 +1,6 @@
 const std = @import("std");
-const paging = @import("../arch/x86_64/paging.zig");
+const hhdm = @import("../mem/hhdm.zig");
+const mem_allocator = @import("../mem/allocator.zig");
 const vmx = @import("vmx.zig");
 // EPT tables map guest-physical addresses to host-physical addresses.
 
@@ -325,33 +326,34 @@ inline fn zeroMem(ptr: anytype, comptime elem_t: type) void {
 }
 
 /// creates a basic page table and populates `eptp`, `eptp_phys` and `guest_mem_addr` fields of guest_state
+/// assumes guest_state is a hhdm mapped ptr
 pub fn init(guest_state: *vmx.VMState) !void {
-    const pml4: *align(4096) [512]EPT_PML4E = @ptrCast(try paging.alloc4KAligned());
+    const pml4: *align(4096) [512]EPT_PML4E = @ptrCast(try mem_allocator.kalloc.allocPage());
     // errdefer free(pml4)
     zeroMem(pml4, EPT_PML4E);
 
-    const pdpt: *align(4096) [512]EPT_PDPTE = @ptrCast(try paging.alloc4KAligned());
+    const pdpt: *align(4096) [512]EPT_PDPTE = @ptrCast(try mem_allocator.kalloc.allocPage());
     // errdefer free(pdpt)
     zeroMem(pdpt, EPT_PDPTE);
 
-    const pd: *align(4096) [512]EPT_PDE = @ptrCast(try paging.alloc4KAligned());
+    const pd: *align(4096) [512]EPT_PDE = @ptrCast(try mem_allocator.kalloc.allocPage());
     // errdefer free(pd)
     zeroMem(pd, EPT_PDE);
 
-    const pt: *align(4096) [512]EPT_PTE = @ptrCast(try paging.alloc4KAligned());
+    const pt: *align(4096) [512]EPT_PTE = @ptrCast(try mem_allocator.kalloc.allocPage());
     // errdefer free(pt)
     zeroMem(pt, EPT_PTE);
 
-    pd.*[0] = .makeEntry(.PT, paging.physAddr(@intFromPtr(pt)).?);
-    pdpt.*[0] = .makeEntry(.PD, paging.physAddr(@intFromPtr(pd)).?);
-    pml4.*[0] = .makeEntry(paging.physAddr(@intFromPtr(pdpt)).?);
+    pd.*[0] = .makeEntry(.PT, hhdm.physOf(pt));
+    pdpt.*[0] = .makeEntry(.PD, hhdm.physOf(pd));
+    pml4.*[0] = .makeEntry(hhdm.physOf(pdpt));
     guest_state.eptp = .{
         .dirty_access_enabled = 1,
         .memory_type = 6, // Write Back
         .page_walk_length = 4 - 1, // 4 tables walked
-        .pml4_addr = @truncate(paging.physAddr(@intFromPtr(pml4)).? >> 12),
+        .pml4_addr = @truncate(hhdm.physOf(pml4) >> 12),
     };
-    guest_state.eptp_phys = paging.physAddr(@intFromPtr(&guest_state.eptp)).?;
+    guest_state.eptp_phys = hhdm.physOf(&guest_state.eptp);
 
     const hlt_byte: u8 = 0xf4;
 
@@ -359,9 +361,9 @@ pub fn init(guest_state: *vmx.VMState) !void {
     // the number 10 is arbitrary. should be dynamic in the future.
     var first: bool = true;
     for (0..10) |i| {
-        const guest_mem_sect = try paging.alloc4KAligned();
+        const guest_mem_sect = try mem_allocator.kalloc.allocPage();
         @memset(guest_mem_sect.*[0..], hlt_byte);
-        const phys_addr: u64 = paging.physAddr(@intFromPtr(guest_mem_sect)).?;
+        const phys_addr: u64 = hhdm.physOf(guest_mem_sect);
         if (first) {
             first = false;
             guest_state.guest_mem_addr = @intFromPtr(guest_mem_sect);

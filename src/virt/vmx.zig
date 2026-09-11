@@ -1,5 +1,6 @@
 const std = @import("std");
-const paging = @import("../arch/x86_64/paging.zig");
+const hhdm = @import("../mem/hhdm.zig");
+const mem_allocator = @import("../mem/allocator.zig");
 const ept = @import("ept.zig");
 const msr = @import("msr.zig");
 const debug = @import("../debug.zig");
@@ -109,16 +110,16 @@ pub const VMState = extern struct {
 
         try ept.init(self);
 
-        const stack_pages: [1]*[4096]u8 = .{try paging.alloc4KAligned()};
+        const stack_pages: [1]*[4096]u8 = .{try mem_allocator.kalloc.allocPage()};
         self.vmm_stack = @ptrCast(stack_pages[0]);
         self.vmm_stack.len = stack_pages.len * 4096;
         inline for (stack_pages[0..]) |stack_page| {
             @memset(stack_page.*[0..], @as(u8, 0));
         }
 
-        const msr_bitmap_page = try paging.alloc4KAligned();
+        const msr_bitmap_page = try mem_allocator.kalloc.allocPage();
         self.msr_bitmap = msr_bitmap_page;
-        self.msr_bitmap_phys = paging.physAddr(@intFromPtr(msr_bitmap_page)).?;
+        self.msr_bitmap_phys = hhdm.physOf(msr_bitmap_page);
         @memset(msr_bitmap_page.*[0..], @as(u8, 0));
 
         try vmcs.setup(self);
@@ -127,9 +128,9 @@ pub const VMState = extern struct {
 
 /// Prepares the VMXON region and executes VMXON.
 pub fn allocVmxonRegion(guest_state: *VMState) !void {
-    const vmxon_page = try paging.alloc4KAligned();
+    const vmxon_page = try mem_allocator.kalloc.allocPage();
     const vmxon_virt = @intFromPtr(vmxon_page);
-    const vmxon_region_phys = paging.physAddr(vmxon_virt) orelse return error.vmxon_region_not_mapped;
+    const vmxon_region_phys = hhdm.physOf(vmxon_page);
 
     std.log.info("virtual buff addr for VMXON at 0x{x}\n", .{vmxon_virt});
     std.log.info("physical buff addr for VMXON at 0x{x}\n", .{vmxon_region_phys});

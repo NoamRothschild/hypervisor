@@ -1,13 +1,14 @@
 const std = @import("std");
 const debug = @import("debug.zig");
 const gdt = @import("arch/x86_64/gdt.zig");
-const paging = @import("arch/x86_64/paging.zig");
 const vmx = @import("virt/vmx.zig");
 const ept = @import("virt/ept.zig");
 const vmcs = @import("virt/vmcs.zig");
 const mbt2 = @import("arch/x86_64/multiboot2.zig");
 const hhdm = @import("mem/hhdm.zig");
 const mem_allocator = @import("mem/allocator.zig");
+const GuestAllocator = @import("mem/guest_allocator.zig").GuestAllocator;
+const kalloc = &mem_allocator.kalloc;
 
 comptime {
     _ = @import("arch/x86_64/entry.zig");
@@ -52,25 +53,23 @@ pub fn kmain() !void {
     hhdm.init();
     std.log.info("HHDM initialized\n", .{});
 
-    const kallocator = mem_allocator.init();
+    mem_allocator.init();
     std.log.info("kernel allocator initialized\n", .{});
 
-    var node: @TypeOf(kallocator.fla.head) = kallocator.fla.head;
+    const scratch = try kalloc.alloc(u8, 64);
+    kalloc.free(scratch);
+
+    const pages = try kalloc.allocPages(2);
+    debug.printf("allocated {d} pool pages at 0x{x}\n", .{ pages.len / @TypeOf(kalloc.*).page_size, @intFromPtr(pages.ptr) });
+    kalloc.freePages(pages);
+
+    var guest_alloc: GuestAllocator = try .init(kalloc.allocator());
+    std.log.info("guest allocator initialized, {d} free 1GB blocks\n", .{guest_alloc.freeBlocks()});
+
+    var node: @TypeOf(kalloc.fla.head) = kalloc.fla.head;
     while (node) |n| {
         defer node = n.next;
-        debug.printf("fla allocator block free of size: {d:.2}KB\n", .{@as(f64, @floatFromInt(n.block_size)) / (1 << 20)});
-    }
-
-    for (0..10) |_| {
-        const page_addr: [*]usize = @ptrFromInt(paging.allocPage() catch |err| {
-            debug.printf("page allocation failed with: {s}\n", .{@errorName(err)});
-            return;
-        });
-        debug.printf("allocated a new page at addr {*}\n", .{page_addr});
-        const first = page_addr[0];
-        debug.printf("read from my_special_addr: {d}\n", .{first});
-
-        paging.unmapPage(@intFromPtr(page_addr));
+        debug.printf("fla allocator block free of size: {d:.2}MB\n", .{@as(f64, @floatFromInt(n.block_size)) / (1 << 20)});
     }
 
     asm volatile ("int $144");
@@ -82,7 +81,7 @@ pub fn kmain() !void {
         trap();
     }
 
-    const guest_states: *[1]vmx.VMState = @ptrCast(try paging.alloc4KAligned());
+    const guest_states: *[1]vmx.VMState = @ptrCast(try kalloc.allocPage());
 
     // TODO: run this block for each CPU
     for (guest_states) |*guest_state| {
