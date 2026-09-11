@@ -12,8 +12,8 @@ const Allocator = std.mem.Allocator;
 
 const PageBitmap = BitmapAllocator(0x1000);
 
-/// how many 4KB pages the page pool is carved out of the fla for (512KB)
-pub const page_pool_pages: usize = 128;
+/// how many 4KB pages the page pool is carved out of the fla for (768KB)
+pub const page_pool_pages: usize = 192;
 
 pub const KAlloc = struct {
     pub const page_size = PageBitmap.block_size;
