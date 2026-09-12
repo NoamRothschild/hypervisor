@@ -7,7 +7,7 @@ const vmcs = @import("virt/vmcs.zig");
 const mbt2 = @import("arch/x86_64/multiboot2.zig");
 const hhdm = @import("mem/hhdm.zig");
 const mem_allocator = @import("mem/allocator.zig");
-const GuestAllocator = @import("mem/guest_allocator.zig").GuestAllocator;
+const GuestAllocator = @import("mem/guest_allocator.zig");
 const kalloc = &mem_allocator.kalloc;
 
 comptime {
@@ -64,7 +64,7 @@ pub fn kmain() !void {
     kalloc.freePages(pages);
 
     var guest_alloc: GuestAllocator = try .init(kalloc.allocator());
-    std.log.info("guest allocator initialized, {d} free 1GB blocks\n", .{guest_alloc.freeBlocks()});
+    std.log.info("guest allocator initialized, {d} free 1GB blocks\n", .{guest_alloc.availBlocks()});
 
     var node: @TypeOf(kalloc.fla.head) = kalloc.fla.head;
     while (node) |n| {
@@ -89,8 +89,9 @@ pub fn kmain() !void {
         std.log.info("vmx enabled\n", .{});
 
         defer vmx.vmxoff();
-        try guest_state.prepare();
+        try guest_state.prepare(&guest_alloc, .{});
 
+        std.log.info("launching guest...\n", .{});
         if (vmx.vmlaunch()) {
             std.log.info("vm launch finished\n", .{});
         } else {

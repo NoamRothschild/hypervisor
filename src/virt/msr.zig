@@ -83,16 +83,63 @@ pub const IA32_FEATURE_CONTROL = packed struct(u64) {
     enable_smx: u1,
     /// Enables VMXON outside SMX operation (Standard VT-x).
     enable_vmxon: u1,
-    reserved1: u5,
+    rsvd1: u5,
     /// Bits 8-14: SENTER local function parameter control options.
     senter_parameter_controls: u7,
     /// SENTER global enable bit.
     senter_global_enable: u1,
-    reserved2: u1,
+    rsvd2: u1,
     /// SGX Launch Control Enable.
     sgx_launch_control: u1,
-    reserved3: u2,
+    rsvd3: u2,
     /// Local Machine Check Exception (LMCE) Enable.
     lmce_on: u1,
-    reserved4: u43,
+    rsvd4: u43,
+};
+
+/// Reports which EPT and VPID capabilities the processor supports.
+/// Only meaningful when the secondary controls allow EPT or VPID.
+pub const IA32_VMX_EPT_VPID_CAP = packed struct(u64) {
+    execute_only: u1,
+    rsvd1: u5,
+    page_walk_length_4: u1,
+    page_walk_length_5: u1,
+    /// EPT paging structures may be Uncacheable (EPTP memory type 0).
+    memory_type_uc: u1,
+    rsvd2: u5,
+    memory_type_wb: u1,
+    rsvd3: u1,
+    /// EPT PDEs may map a 2MB page (page_size bit set).
+    pages_2mb: u1,
+    /// EPT PDPTEs may map a 1GB page (page_size bit set).
+    pages_1gb: u1,
+    rsvd4: u2,
+    /// The INVEPT instruction is supported.
+    invept: u1,
+    dirty_access_flags: u1,
+    /// Advanced VM-exit information is reported for EPT violations.
+    advanced_ept_violation_info: u1,
+    /// Supervisor shadow-stack control is supported.
+    supervisor_shadow_stack: u1,
+    rsvd5: u1,
+    /// INVEPT type 1 (single-context) is supported.
+    invept_single_context: u1,
+    /// INVEPT type 2 (all-context) is supported.
+    invept_all_context: u1,
+    rsvd6: u5,
+    /// The INVVPID instruction is supported.
+    invvpid: u1,
+    rsvd7: u7,
+    /// INVVPID type 0 (individual-address) is supported.
+    invvpid_individual_addr: u1,
+    /// INVVPID type 1 (single-context) is supported.
+    invvpid_single_context: u1,
+    /// INVVPID type 2 (all-context) is supported.
+    invvpid_all_context: u1,
+    /// INVVPID type 3 (single-context-retaining-globals) is supported.
+    invvpid_single_context_retaining_globals: u1,
+    rsvd8: u4,
+    /// Maximum HLAT prefix size, in paging-structure entries.
+    max_hlat_prefix_size: u6,
+    rsvd9: u10,
 };

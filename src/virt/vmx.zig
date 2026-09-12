@@ -5,6 +5,7 @@ const ept = @import("ept.zig");
 const msr = @import("msr.zig");
 const debug = @import("../debug.zig");
 const vmcs = @import("vmcs.zig");
+const GuestAllocator = @import("../mem/guest_allocator.zig");
 const rdmsr = msr.rdmsr;
 const wrmsr = msr.wrmsr;
 
@@ -65,10 +66,10 @@ pub const VMState = extern struct {
     vmxon_region: u64,
     /// phys addr
     vmcs_region: u64,
-    /// virt addr
-    eptp: ept.EPTP,
-    /// phys addr
-    eptp_phys: u64,
+    /// guest-physical addr of the guest's own PML4
+    guest_cr3: u64,
+    /// total guest RAM, identity-mapped from guest-physical 0
+    guest_ram_block_count: u64,
     /// virt addr, stack for vmm in VM-Exit state
     vmm_stack: *align(1) []u8,
     vmm_stack_size: usize,
@@ -76,17 +77,25 @@ pub const VMState = extern struct {
     msr_bitmap: *[4096]u8,
     /// msr bitmap phys addr
     msr_bitmap_phys: u64,
-    /// holds the host virt address of the page allocated to the guest
-    /// NOTE: VMState is special for every CPU for every host. This field is shared between all cpus for the same guest
-    guest_mem_addr: u64 = 0,
+    guest_pml4: *align(4096) [512]ept.EPT_PML4E,
+
+    pub const VMConfig = struct {
+        os: enum { linux, windows } = .linux,
+        vcpu_count: usize = 1,
+        /// each block size is 1GB
+        ram_block_count: usize = 2,
+    };
 
     /// initializes the given VMState, as long as
     /// - calling vmxon
     /// - setting up the vmcs
     /// - loading the vmcs into the cpu (vmptrld)
     /// - initializing a basic EPT
-    pub fn prepare(self: *VMState) !void {
+    pub fn prepare(self: *VMState, guest_allocator: *GuestAllocator, config: VMConfig) !void {
+        if (config.vcpu_count != 1)
+            @panic("vmx.VMState.prepare: vcpu count is more than 1 (unimplemented)");
         self.* = std.mem.zeroes(VMState);
+        self.guest_ram_block_count = config.ram_block_count;
 
         allocVmxonRegion(self) catch |err| {
             std.log.err("VMXON failed: {s}\n", .{@errorName(err)});
@@ -108,7 +117,7 @@ pub const VMState = extern struct {
 
         std.log.info("VMPTRLD succeeded\n", .{});
 
-        try ept.init(self);
+        const eptp = try ept.init(self, guest_allocator, config.ram_block_count);
 
         const stack_pages: [1]*[4096]u8 = .{try mem_allocator.kalloc.allocPage()};
         self.vmm_stack = @ptrCast(stack_pages[0]);
@@ -122,7 +131,7 @@ pub const VMState = extern struct {
         self.msr_bitmap_phys = hhdm.physOf(msr_bitmap_page);
         @memset(msr_bitmap_page.*[0..], @as(u8, 0));
 
-        try vmcs.setup(self);
+        try vmcs.setup(self, eptp);
     }
 };
 

@@ -6,6 +6,8 @@ const hhdm = @import("../mem/hhdm.zig");
 const mem_allocator = @import("../mem/allocator.zig");
 const gdt = @import("../arch/x86_64/gdt.zig");
 const idt = @import("../arch/x86_64/idt.zig");
+const ept = @import("ept.zig");
+const GuestAllocator = @import("../mem/guest_allocator.zig");
 const VMState = vmx.VMState;
 const rdmsr = msr.rdmsr;
 const wrmsr = msr.wrmsr;
@@ -88,7 +90,7 @@ pub fn load(vmstate: *VMState) bool {
     return true;
 }
 
-pub fn setup(vmstate: *VMState) !void {
+pub fn setup(vmstate: *VMState, eptp: ept.EPTP) !void {
     vmwriteAsm(.HOST_ES_SELECTOR,
         \\ mov %es, %rbx
         \\ and $0xf8, %rbx
@@ -160,18 +162,25 @@ pub fn setup(vmstate: *VMState) !void {
         &[_]VmExecutionControl{
             .CPU_BASED_HLT_EXITING,
             .CPU_BASED_ACTIVATE_SECONDARY_CONTROLS,
+            .CPU_BASED_ACTIVATE_MSR_BITMAP,
         },
         .IA32_VMX_PROCBASED_CTLS,
     ));
 
-    vmwrite(.SECONDARY_VM_EXEC_CONTROL, adjustControls(
+    // adjustControls silently drops controls the cpu doesn't allow, so confirm
+    // EPT survived before relying on it for the guest's address space.
+    const secondary = adjustControls(
         SecondaryVmExecutionControl,
         &[_]SecondaryVmExecutionControl{
             .CPU_BASED_CTL2_RDTSCP,
-            // .CPU_BASED_CTL2_ENABLE_EPT, // for dealing with ept
+            .CPU_BASED_CTL2_ENABLE_EPT,
         },
         .IA32_VMX_PROCBASED_CTLS2,
-    ));
+    );
+    if (secondary & @intFromEnum(SecondaryVmExecutionControl.CPU_BASED_CTL2_ENABLE_EPT) == 0)
+        return error.EptUnsupported;
+    vmwrite(.SECONDARY_VM_EXEC_CONTROL, secondary);
+    vmwrite(.EPT_POINTER, @bitCast(eptp));
 
     vmwrite(.PIN_BASED_VM_EXEC_CONTROL, adjustControls(u64, &[_]u64{}, .IA32_VMX_PINBASED_CTLS));
     vmwrite(.VM_EXIT_CONTROLS, adjustControls(
@@ -191,7 +200,7 @@ pub fn setup(vmstate: *VMState) !void {
     ));
 
     vmwriteAsm(.GUEST_CR0, "mov %cr0, %rbx");
-    vmwriteAsm(.GUEST_CR3, "mov %cr3, %rbx");
+    vmwrite(.GUEST_CR3, vmstate.guest_cr3);
     vmwriteAsm(.GUEST_CR4, "mov %cr4, %rbx");
 
     vmwriteAsm(.HOST_CR0, "mov %cr0, %rbx");
@@ -226,8 +235,8 @@ pub fn setup(vmstate: *VMState) !void {
     vmwrite(.HOST_IA32_SYSENTER_EIP, rdmsr(.IA32_SYSENTER_EIP));
     vmwrite(.HOST_IA32_SYSENTER_ESP, rdmsr(.IA32_SYSENTER_ESP));
 
-    vmwrite(.GUEST_RSP, vmstate.guest_mem_addr);
-    vmwrite(.GUEST_RIP, vmstate.guest_mem_addr);
+    vmwrite(.GUEST_RSP, vmstate.guest_ram_block_count * GuestAllocator.block_size);
+    vmwrite(.GUEST_RIP, 0);
 
     vmwrite(.HOST_RSP, @as(u64, @intFromPtr(vmstate.vmm_stack)) +% vmstate.vmm_stack.len -% 1);
     vmwrite(.HOST_RIP, @intFromPtr(&vmx.vmExitHandler));
@@ -248,16 +257,17 @@ inline fn vmwriteAsm(selector: vmx.SelectorField, value_instr: []const u8) void 
         , .{ value_instr, @intFromEnum(selector) }) ::: .{ .rbx = true, .rax = true });
 }
 
-fn adjustControls(comptime T: type, ctrls: []const T, by_msr: msr.All) u64 {
+/// merges all controls given while stripping away all controls not supported by the proccessor
+fn adjustControls(comptime CtrlType: type, ctrls: []const CtrlType, by_msr: msr.All) u64 {
     var all_ctrl: u64 = 0;
     for (ctrls) |ctrl|
-        all_ctrl |= if (@typeInfo(T) == .@"enum") @intFromEnum(ctrl) else ctrl;
+        all_ctrl |= if (@typeInfo(CtrlType) == .@"enum") @intFromEnum(ctrl) else ctrl;
     const msr_val = rdmsr(by_msr);
-    const msr_low: u32 = @truncate(msr_val);
-    const msr_high: u32 = @truncate(msr_val >> 32);
+    const allowed_on_settings: u32 = @truncate(msr_val);
+    const allowed_off_settings: u32 = @truncate(msr_val >> 32);
 
-    all_ctrl &= msr_high;
-    all_ctrl |= msr_low;
+    all_ctrl &= allowed_off_settings;
+    all_ctrl |= allowed_on_settings;
     return all_ctrl;
 }
 
