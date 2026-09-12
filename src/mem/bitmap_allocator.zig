@@ -72,7 +72,7 @@ pub fn BitmapAllocator(comptime size: usize) type {
             self.avail.setRangeValue(.{ .start = first, .end = first + count }, true);
         }
 
-        pub fn freeBlocks(self: *const Self) usize {
+        pub fn availBlocks(self: *const Self) usize {
             return self.avail.count();
         }
 
@@ -153,7 +153,7 @@ test "alloc hands out contiguous runs and free reclaims them" {
 
     ba.free(0x11000, 3);
     try std.testing.expectEqual(0x11000, try ba.alloc(2));
-    try std.testing.expectEqual(1, ba.freeBlocks());
+    try std.testing.expectEqual(1, ba.availBlocks());
 }
 
 test "allocAligned skips misaligned candidate runs" {
@@ -169,11 +169,11 @@ test "markFree rounds inwards, markUsed rounds outwards" {
     defer ba.deinit();
 
     ba.markFree(0x800, 0x3000); // only [0x1000, 0x3000) is whole
-    try std.testing.expectEqual(2, ba.freeBlocks());
+    try std.testing.expectEqual(2, ba.availBlocks());
 
     ba.markUsed(0x2fff, 1); // touches [0x2000, 0x3000)
-    try std.testing.expectEqual(1, ba.freeBlocks());
+    try std.testing.expectEqual(1, ba.availBlocks());
 
     ba.markFree(0x7000, 0x100000); // clamped to the managed region
-    try std.testing.expectEqual(2, ba.freeBlocks());
+    try std.testing.expectEqual(2, ba.availBlocks());
 }
