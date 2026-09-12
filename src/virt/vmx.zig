@@ -61,7 +61,7 @@ pub fn enableOperation() void {
         : .{ .memory = true });
 }
 
-pub const VMState = extern struct {
+pub const VMState = struct {
     /// phys addr
     vmxon_region: u64,
     /// phys addr
@@ -71,8 +71,7 @@ pub const VMState = extern struct {
     /// total guest RAM, identity-mapped from guest-physical 0
     guest_ram_block_count: u64,
     /// virt addr, stack for vmm in VM-Exit state
-    vmm_stack: *align(1) []u8,
-    vmm_stack_size: usize,
+    vmm_stack: []align(4096) u8,
     /// msr bitmap virt addr
     msr_bitmap: *[4096]u8,
     /// msr bitmap phys addr
@@ -94,7 +93,7 @@ pub const VMState = extern struct {
     pub fn prepare(self: *VMState, guest_allocator: *GuestAllocator, config: VMConfig) !void {
         if (config.vcpu_count != 1)
             @panic("vmx.VMState.prepare: vcpu count is more than 1 (unimplemented)");
-        self.* = std.mem.zeroes(VMState);
+
         self.guest_ram_block_count = config.ram_block_count;
 
         allocVmxonRegion(self) catch |err| {
@@ -119,12 +118,8 @@ pub const VMState = extern struct {
 
         const eptp = try ept.init(self, guest_allocator, config.ram_block_count);
 
-        const stack_pages: [1]*[4096]u8 = .{try mem_allocator.kalloc.allocPage()};
-        self.vmm_stack = @ptrCast(stack_pages[0]);
-        self.vmm_stack.len = stack_pages.len * 4096;
-        inline for (stack_pages[0..]) |stack_page| {
-            @memset(stack_page.*[0..], @as(u8, 0));
-        }
+        self.vmm_stack = try mem_allocator.kalloc.allocPages(1);
+        @memset(self.vmm_stack, 0);
 
         const msr_bitmap_page = try mem_allocator.kalloc.allocPage();
         self.msr_bitmap = msr_bitmap_page;
@@ -242,49 +237,53 @@ export fn __vmReturnSucceed() callconv(.naked) void {
 
 pub fn vmExitHandler() callconv(.naked) void {
     asm volatile (
-        \\ push %r15
-        \\ push %r14
-        \\ push %r13
-        \\ push %r12
-        \\ push %r11
-        \\ push %r10
-        \\ push %r9
-        \\ push %r8
-        \\ push %rdi
-        \\ push %rsi
-        \\ push %rbp
-        \\ push %rbp
-        \\ push %rbx
-        \\ push %rdx
-        \\ push %rcx
         \\ push %rax
+        \\ push %rcx
+        \\ push %rdx
+        \\ push %rbx
+        \\ push %rbp
+        \\ push %rsi
+        \\ push %rdi
+        \\ push %r8
+        \\ push %r9
+        \\ push %r10
+        \\ push %r11
+        \\ push %r12
+        \\ push %r13
+        \\ push %r14
+        \\ push %r15
         \\
-        \\ mov %rsp, %rcx
-        \\ sub $0x28, %rsp
+        \\ // rbx is callee-saved under SysV.
+        \\ mov %rsp, %rbx
+        \\ mov %rbx, %rdi
+        \\
+        \\ // force the 16-byte alignment SysV wants
+        \\ and $-16, %rsp
         \\ call mainVmExitHandler
-        \\ add $0x28, %rsp
         \\
         \\ // al=1 => stop and return to kmain; al=0 => resume guest
         \\ test %al, %al
         \\ jnz __vmReturnSucceed
         \\
-        \\ pop %rcx
-        \\ pop %rdx
-        \\ pop %rbx
-        \\ pop %rbp
-        \\ pop %rbp
-        \\ pop %rsi
-        \\ pop %rdi
-        \\ pop %r8
-        \\ pop %r9
-        \\ pop %r10
-        \\ pop %r11
-        \\ pop %r12
-        \\ pop %r13
-        \\ pop %r14
-        \\ pop %r15
-        \\
         \\ call resumeToNextInstruction
+        \\ mov %rbx, %rsp
+        \\
+        \\ pop %r15
+        \\ pop %r14
+        \\ pop %r13
+        \\ pop %r12
+        \\ pop %r11
+        \\ pop %r10
+        \\ pop %r9
+        \\ pop %r8
+        \\ pop %rdi
+        \\ pop %rsi
+        \\ pop %rbp
+        \\ pop %rbx
+        \\ pop %rdx
+        \\ pop %rcx
+        \\ pop %rax
+        \\
         \\ vmresume
         \\
         \\ call vmResumeInstructionFailed

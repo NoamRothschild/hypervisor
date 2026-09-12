@@ -227,6 +227,8 @@ pub fn setup(vmstate: *VMState, eptp: ept.EPTP) !void {
 
     vmwriteAsm(.GUEST_RFLAGS, "pushfq; pop %rbx");
 
+    vmwrite(.MSR_BITMAP, vmstate.msr_bitmap_phys);
+
     vmwrite(.GUEST_SYSENTER_CS, rdmsr(.IA32_SYSENTER_CS));
     vmwrite(.GUEST_SYSENTER_EIP, rdmsr(.IA32_SYSENTER_EIP));
     vmwrite(.GUEST_SYSENTER_ESP, rdmsr(.IA32_SYSENTER_ESP));
@@ -238,7 +240,7 @@ pub fn setup(vmstate: *VMState, eptp: ept.EPTP) !void {
     vmwrite(.GUEST_RSP, vmstate.guest_ram_block_count * GuestAllocator.block_size);
     vmwrite(.GUEST_RIP, 0);
 
-    vmwrite(.HOST_RSP, @as(u64, @intFromPtr(vmstate.vmm_stack)) +% vmstate.vmm_stack.len -% 1);
+    vmwrite(.HOST_RSP, @intFromPtr(vmstate.vmm_stack.ptr) +% vmstate.vmm_stack.len);
     vmwrite(.HOST_RIP, @intFromPtr(&vmx.vmExitHandler));
 }
 
