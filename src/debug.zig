@@ -116,12 +116,12 @@ pub fn getFeatures() CpuFeatures {
         : [ecx] "={ecx}" (ecx),
           [edx] "={edx}" (edx),
         :
-        : .{ .ecx = true, .edx = true, .eax = true });
+        : .{ .eax = true, .ebx = true, .ecx = true, .edx = true });
     const both: u64 = @as(u64, ecx) | (@as(u64, edx) << 32);
     return @bitCast(both);
 }
 
-const CpuFeatures = packed struct {
+pub const CpuFeatures = packed struct {
     // ecx
     sse3: u1,
     pclmul: u1,

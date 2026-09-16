@@ -96,17 +96,16 @@ pub const Mapper = struct {
         @panic("unimplemented");
     }
 
-    pub fn translate(self: *Mapper, vaddr: VirtAddr) ?struct { paddr: PhysAddr, ps: PageSize } {
-        _ = self;
+    pub fn translate(pml4: *[512]paging.PML4E, vaddr: VirtAddr) ?struct { paddr: PhysAddr, ps: PageSize } {
         const pml4_idx: usize = (vaddr >> 39) & 0x1ff;
         const pdpt_idx: usize = (vaddr >> 30) & 0x1ff;
         const pd_idx: usize = (vaddr >> 21) & 0x1ff;
         const pt_idx: usize = (vaddr >> 12) & 0x1ff;
 
-        const pml4e_p = paging.PML4T[pml4_idx].present();
+        const pml4e_p = pml4.*[pml4_idx].present();
         if (!pml4e_p) return null;
 
-        const pdpt_paddr = paging.PML4T[pml4_idx].physAddr();
+        const pdpt_paddr = pml4.*[pml4_idx].physAddr();
         const pdpt: *[512]paging.PDPTE = @ptrFromInt(pdpt_paddr | hhdm.virt_base);
 
         const pdpte: *paging.PDPTE = &pdpt.*[pdpt_idx];
@@ -164,7 +163,7 @@ pub fn test1() void {
     debug.printf("trying to map 0x{x} to 0x{x}\n", .{ virt, phys_addr_my_var });
     mapper.map(virt, phys_addr_my_var, .@"4 KB", .{}) catch {};
 
-    if (mapper.translate(virt)) |info| {
+    if (Mapper.translate(&paging.PML4T, virt)) |info| {
         debug.printf("tranlate -> {}\n", .{info});
     }
 

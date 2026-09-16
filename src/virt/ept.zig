@@ -5,6 +5,7 @@ const vmx = @import("vmx.zig");
 const msr = @import("msr.zig");
 const paging = @import("../arch/x86_64/paging.zig");
 const GuestAllocator = @import("../mem/guest_allocator.zig");
+const kalloc = &@import("../mem/allocator.zig").kalloc;
 // EPT tables map guest-physical addresses to host-physical addresses.
 
 /// EPT pointer
@@ -333,6 +334,9 @@ inline fn zeroMem(ptr: anytype, comptime elem_t: type) void {
 const guest_pml4_gpa = 0x1000;
 const guest_pdpt_gpa = 0x2000;
 
+const HugePage = [1 << 30]u8;
+const HugePagePtr = *align(0x1000) HugePage;
+
 /// creates a basic page table and populates `guest_cr3` and `guest_pml4` fields of guest_state
 /// assumes guest_state is a hhdm mapped ptr
 pub fn init(guest_state: *vmx.VMState, guest_allocator: *GuestAllocator, block_count: usize) !EPTP {
@@ -347,6 +351,9 @@ pub fn init(guest_state: *vmx.VMState, guest_allocator: *GuestAllocator, block_c
     if (caps.memory_type_wb == 0) return error.EptNoWriteBack;
     if (caps.pages_1gb == 0) return error.EptNo1GbPages;
 
+    guest_state.guest_mem_pages = try kalloc.alloc(HugePagePtr, block_count);
+    errdefer kalloc.free(guest_state.guest_mem_pages);
+
     const pml4: *align(4096) [512]EPT_PML4E = @ptrCast(try mem_allocator.kalloc.allocPage());
     guest_state.guest_pml4 = pml4;
     errdefer mem_allocator.kalloc.freePage(@ptrCast(pml4));
@@ -360,23 +367,28 @@ pub fn init(guest_state: *vmx.VMState, guest_allocator: *GuestAllocator, block_c
 
     const hlt_byte: u8 = 0xf4;
 
-    const first_block: *align(0x1000) [GuestAllocator.block_size]u8 = blk: {
+    const first_block: HugePagePtr = blk: {
         // out of guest memory handled at the top of the scope.
         const page_phys = guest_allocator.alloc(1) catch unreachable;
+        const page: HugePagePtr = @ptrFromInt(hhdm.virtOf(page_phys));
         pdpt.*[0] = .makeEntry(.@"1 GB", page_phys);
-        break :blk @ptrFromInt(hhdm.virtOf(page_phys));
+
+        guest_state.guest_mem_pages[0] = page;
+        break :blk page;
     };
     @memset(first_block[0..4096], hlt_byte);
 
     for (1..block_count) |i| {
         // out of guest memory handled at the top of the scope.
         const page_phys = guest_allocator.alloc(1) catch unreachable;
+        const page: HugePagePtr = @ptrFromInt(hhdm.virtOf(page_phys));
 
         // note: we can clear memory, but it would be very expensive.
         // this will fix a possible attack vector where a user gets hold
         // of a memory block previously owned by another user, and read his
         // old RAM data.
 
+        guest_state.guest_mem_pages[i] = page;
         pdpt.*[i] = .makeEntry(.@"1 GB", page_phys);
     }
 
@@ -390,6 +402,70 @@ pub fn init(guest_state: *vmx.VMState, guest_allocator: *GuestAllocator, block_c
         .page_walk_length = 4 - 1, // 4 tables walked
         .pml4_addr = @truncate(hhdm.physOf(pml4) >> 12),
     };
+}
+
+pub fn guestPhysToHostVirt(guest_state: *vmx.VMState, guest_phys: u64, must_4k_align: bool) !u64 {
+    const huge_page_idx: usize = @divFloor(guest_phys, (1 << 30));
+    const inner_offset: usize = @rem(guest_phys, (1 << 30));
+    if (must_4k_align and inner_offset & ((1 << 12) - 1) != 0)
+        return error.Non4KAlignedPageTableEntry;
+    if (huge_page_idx >= guest_state.guest_mem_pages.len)
+        return error.OOBRamAddr;
+
+    const page_ptr = guest_state.guest_mem_pages[huge_page_idx];
+    return @intFromPtr(&page_ptr.*[inner_offset]);
+}
+
+/// walks the guest's current 4-level page tables
+pub fn guestVirtToHostVirt(guest_state: *vmx.VMState, guest_cr3: u64, vaddr: u64) !u64 {
+    const pml4_idx: usize = (vaddr >> 39) & 0x1ff;
+    const pdpt_idx: usize = (vaddr >> 30) & 0x1ff;
+    const pd_idx: usize = (vaddr >> 21) & 0x1ff;
+    const pt_idx: usize = (vaddr >> 12) & 0x1ff;
+
+    // the low 12 bits hold the PCID when CR4.PCIDE=1, and bit 63 is the no-flush flag
+    const cr3_masked = guest_cr3 & 0x000f_ffff_ffff_f000;
+    const pml4: *[512]paging.PML4E = @ptrFromInt(try guestPhysToHostVirt(guest_state, cr3_masked, true));
+    const pml4e: *paging.PML4E = &pml4.*[pml4_idx];
+    if (!pml4e.present()) return error.AddressUnmapped;
+
+    const pdpt: *[512]paging.PDPTE = @ptrFromInt(try guestPhysToHostVirt(guest_state, pml4e.physAddr(), true));
+    const pdpte: *paging.PDPTE = &pdpt.*[pdpt_idx];
+    if (!pdpte.present()) return error.AddressUnmapped;
+
+    if (pdpte.@"1 GB".ps == 1)
+        return guestPhysToHostVirt(guest_state, pdpte.physAddr(.@"1 GB") | (vaddr & 0x3fff_ffff), false);
+
+    const pd: *[512]paging.PDE = @ptrFromInt(try guestPhysToHostVirt(guest_state, pdpte.physAddr(.PD), true));
+    const pde: *paging.PDE = &pd.*[pd_idx];
+    if (!pde.present()) return error.AddressUnmapped;
+
+    if (pde.@"2 MB".ps == 1)
+        return guestPhysToHostVirt(guest_state, pde.physAddr(.@"2 MB") | (vaddr & 0x1f_ffff), false);
+
+    const pt: *[512]paging.PTE = @ptrFromInt(try guestPhysToHostVirt(guest_state, pde.physAddr(.PT), true));
+    const pte: *paging.PTE = &pt.*[pt_idx];
+    if (!pte.present()) return error.AddressUnmapped;
+
+    return guestPhysToHostVirt(guest_state, pte.physAddr() | (vaddr & 0xfff), false);
+}
+
+/// copies a `T` out of guest-virtual memory.
+/// handles unaligned addresses and values that straddle a page boundary.
+pub fn readGuest(comptime T: type, guest_state: *vmx.VMState, base_addr: u64, cr3_if_virt: ?u64) !T {
+    var bytes: [@sizeOf(T)]u8 = undefined;
+    var done: usize = 0;
+    while (done < bytes.len) {
+        const addr = base_addr +% done;
+        const n = @min(bytes.len - done, 0x1000 - (addr & 0xfff));
+        const src: [*]const u8 = @ptrFromInt(if (cr3_if_virt) |cr3|
+            try guestVirtToHostVirt(guest_state, cr3, addr)
+        else
+            try guestPhysToHostVirt(guest_state, addr, false));
+        @memcpy(bytes[done..][0..n], src[0..n]);
+        done += n;
+    }
+    return @bitCast(bytes);
 }
 
 /// Builds an x86-64 identity map page table for the guest, inside the guest RAM

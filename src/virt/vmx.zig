@@ -5,6 +5,7 @@ const ept = @import("ept.zig");
 const msr = @import("msr.zig");
 const debug = @import("../debug.zig");
 const vmcs = @import("vmcs.zig");
+const simulate = @import("simulate.zig");
 const GuestAllocator = @import("../mem/guest_allocator.zig");
 const rdmsr = msr.rdmsr;
 const wrmsr = msr.wrmsr;
@@ -77,6 +78,7 @@ pub const VMState = struct {
     /// msr bitmap phys addr
     msr_bitmap_phys: u64,
     guest_pml4: *align(4096) [512]ept.EPT_PML4E,
+    guest_mem_pages: []*align(0x1000) [1 << 30]u8,
 
     pub const VMConfig = struct {
         os: enum { linux, windows } = .linux,
@@ -261,11 +263,16 @@ pub fn vmExitHandler() callconv(.naked) void {
         \\ and $-16, %rsp
         \\ call mainVmExitHandler
         \\
-        \\ // al=1 => stop and return to kmain; al=0 => resume guest
-        \\ test %al, %al
-        \\ jnz __vmReturnSucceed
+        \\ // al is an `ExitAction`
+        \\ // exit(1) => stop and return to kmain
+        \\ cmp $1, %al
+        \\ je __vmReturnSucceed
         \\
+        \\ // resume_at_rip(2) => the handler already set GUEST_RIP
+        \\ cmp $2, %al
+        \\ je 1f
         \\ call resumeToNextInstruction
+        \\1:
         \\ mov %rbx, %rsp
         \\
         \\ pop %r15
@@ -290,11 +297,20 @@ pub fn vmExitHandler() callconv(.naked) void {
     );
 }
 
-/// Returns true when the VMM should leave the guest and return to kmain.
-export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) bool {
+/// What `vmExitHandler` does once `mainVmExitHandler` returns. values are matched in its asm.
+pub const ExitAction = enum(u8) {
+    /// advance RIP past the exiting instruction, then resume the guest
+    @"resume" = 0,
+    /// leave the guest and return to kmain
+    exit = 1,
+    /// resume the guest at GUEST_RIP as is, for handlers that set RIP themselves (e.g. an emulated IRET)
+    resume_at_rip = 2,
+};
+
+/// Returns what the VMM should do next, see `ExitAction`.
+export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) ExitAction {
     const exit_reason: ExitReason = @enumFromInt(vmread(.VM_EXIT_REASON) & 0xffff);
     const exit_qualification = vmread(.EXIT_QUALIFICATION);
-    _ = guest_regs;
 
     debug.printf("VM EXIT REASON: {s}\n", .{@tagName(exit_reason)});
     debug.printf("EXIT QUALIFICATION: 0x{x}\n", .{exit_qualification});
@@ -311,17 +327,18 @@ export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) bool {
         .vmlaunch,
         => {},
 
+        .cpuid => simulate.cpuid(guest_regs),
         .hlt => {
             std.log.info("user executed hlt\n", .{});
-            return true;
+            return .exit;
         },
-        .invalid_guest_state => {
+        .triple_fault, .invalid_guest_state => {
             std.log.err("invalid guest state; not resuming\n", .{});
-            return true;
+            return .exit;
         },
-        else => return false,
+        else => return .@"resume",
     }
-    return false;
+    return .@"resume";
 }
 
 export fn resumeToNextInstruction() callconv(.c) void {
