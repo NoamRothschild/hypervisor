@@ -90,9 +90,11 @@ pub fn kmain() !void {
 
         defer vmx.vmxoff();
         try guest_state.prepare(&guest_alloc, .{});
+        var guest_regs: vmx.CpuState = std.mem.zeroes(vmx.CpuState);
+
 
         std.log.info("launching guest...\n", .{});
-        if (vmx.vmlaunch()) {
+        if (vmx.vmlaunch(&guest_regs)) {
             std.log.info("vm launch finished\n", .{});
         } else {
             std.log.info("vm launch finished failed\n", .{});

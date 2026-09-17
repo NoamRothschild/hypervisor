@@ -184,10 +184,10 @@ pub fn vmxoff() void {
 ///
 /// returns either if vmlaunch failed
 /// or when after the VM caused an exit (will block)
-pub fn vmlaunch() bool {
+pub fn vmlaunch(guest_regs: *const CpuState) bool {
     const ret = asm volatile ("call __vmlaunch"
         : [ret] "={al}" (-> u8),
-        :
+        : [regs] "{rdi}" (guest_regs),
         : .{
           .rcx = true,
           .rdx = true,
@@ -205,12 +205,30 @@ pub fn vmlaunch() bool {
 export var old_rbp: u64 = 0;
 export var old_rsp: u64 = 0;
 
+/// `rdi` points at the `CpuState` the guest should start with
 export fn __vmlaunch() callconv(.naked) void {
     asm volatile (
         \\ push %rbp
         \\ mov %rsp, %rbp
         \\ mov %rbp, old_rbp(%rip)
         \\ mov %rsp, old_rsp(%rip)
+        \\
+        \\ mov %rdi, %rax
+        \\ mov 0(%rax), %r15
+        \\ mov 8(%rax), %r14
+        \\ mov 16(%rax), %r13
+        \\ mov 24(%rax), %r12
+        \\ mov 32(%rax), %r11
+        \\ mov 40(%rax), %r10
+        \\ mov 48(%rax), %r9
+        \\ mov 56(%rax), %r8
+        \\ mov 80(%rax), %rbp
+        \\ mov 88(%rax), %rbx
+        \\ mov 96(%rax), %rdx
+        \\ mov 104(%rax), %rcx
+        \\ mov 72(%rax), %rsi
+        \\ mov 64(%rax), %rdi
+        \\ mov 112(%rax), %rax
         \\
         \\ vmlaunch
         \\
