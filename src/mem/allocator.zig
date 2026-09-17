@@ -45,6 +45,14 @@ pub const KAlloc = struct {
                 self.fla.reserve(entry.addr, entry.len);
         }
 
+        var tags: mbt2.TagIterator = .init();
+        while (tags.next()) |tag| {
+            if (tag.type != .module) continue;
+
+            const mod: *const mbt2.TagType.Module = @ptrCast(@alignCast(tag));
+            self.fla.reserve(mod.mod_start, mod.len());
+        }
+
         // the pool itself and the bitmap tracking it both live inside `fla`
         const pool = self.fla.allocator().alignedAlloc(
             u8,

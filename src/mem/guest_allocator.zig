@@ -29,6 +29,15 @@ pub fn init(backing: Allocator) Allocator.Error!GuestAllocator {
     // the first GB is the kernel allocator's heap (see allocator.zig)
     bitmap.markUsed(0, block_size);
 
+    // blocks holding a bootloader module are not ours to hand to a guest
+    var tags: mbt2.TagIterator = .init();
+    while (tags.next()) |tag| {
+        if (tag.type != .module) continue;
+
+        const mod: *const mbt2.TagType.Module = @ptrCast(@alignCast(tag));
+        bitmap.markUsed(mod.mod_start, mod.len());
+    }
+
     return .{ .bitmap = bitmap };
 }
 

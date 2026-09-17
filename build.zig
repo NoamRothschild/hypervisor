@@ -84,6 +84,9 @@ pub fn build(b: *std.Build) void {
     // Copy GRUB configuration to bootloader location
     _ = wf.addCopyFile(b.path("src/grub.cfg"), "tmpsys/kernel/boot/grub/grub.cfg");
 
+    // the guest kernel, handed to us by GRUB as a multiboot2 module (see grub.cfg)
+    _ = wf.addCopyFile(b.path("src/linuxBzImage"), "tmpsys/kernel/boot/linuxBzImage");
+
     // taking the temp system directory and copying into the global system dir its contents
     const copy_built_system = b.addInstallDirectory(.{
         .source_dir = wf.getDirectory().path(b, "tmpsys/kernel"),

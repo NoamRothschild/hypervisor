@@ -34,6 +34,9 @@ pub fn kmain() !void {
         @panic("invalid multiboot2 magic number!");
     }
 
+    hhdm.init();
+    std.log.info("HHDM initialized\n", .{});
+
     const mmap_tag = mbt2.findTag(.mmap) orelse @panic("unable to find mmap tag in mb2 hdr");
 
     debug.printf("mmap entries:\n", .{});
@@ -49,9 +52,6 @@ pub fn kmain() !void {
     for (0..3) |i| {
         std.log.info("gdt[{d}] = {}\n", .{ i, gdt.getSegmentDescriptor(@truncate(i << 3), gdt_info.base).* });
     }
-
-    hhdm.init();
-    std.log.info("HHDM initialized\n", .{});
 
     mem_allocator.init();
     std.log.info("kernel allocator initialized\n", .{});

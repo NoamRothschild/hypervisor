@@ -1,3 +1,6 @@
+const std = @import("std");
+const hhdm = @import("../../mem/hhdm.zig");
+
 export var mbd_raw: u32 linksection(".bss.boot") = undefined;
 pub var magic: u32 = undefined;
 
@@ -9,7 +12,7 @@ comptime {
 pub const bootloader_magic = 0x36d76289;
 
 pub inline fn mbd() *align(4) anyopaque {
-    return @ptrFromInt(@as(u64, mbd_raw));
+    return @ptrFromInt(hhdm.virtOf(@as(u64, mbd_raw)));
 }
 
 pub const TagType = enum(u32) {
@@ -64,6 +67,41 @@ pub const TagType = enum(u32) {
             return @ptrFromInt(@intFromPtr(self) + @sizeOf(@This()));
         }
     };
+
+    // struct multiboot_tag_module
+    // {
+    //   multiboot_uint32_t type;
+    //   multiboot_uint32_t size;
+    //   multiboot_uint32_t mod_start;
+    //   multiboot_uint32_t mod_end;
+    //   char cmdline[0];
+    // };
+    pub const Module = extern struct {
+        type: TagType,
+        size: u32,
+        /// physical, inclusive
+        mod_start: u32,
+        /// physical, exclusive
+        mod_end: u32,
+        // a NUL-terminated cmdline follows
+
+        pub fn len(self: *const @This()) usize {
+            return self.mod_end - self.mod_start;
+        }
+
+        /// whatever was written after the path in `module2 <path> <cmdline>`
+        pub fn cmdline(self: *const @This()) []const u8 {
+            const str: [*:0]const u8 = @ptrFromInt(@intFromPtr(self) + @sizeOf(@This()));
+            return std.mem.span(str);
+        }
+
+        /// the module's bytes. GRUB drops modules wherever it likes, which is
+        /// regularly outside the window `paging_init` maps, so go through the HHDM.
+        pub fn data(self: *const @This()) []const u8 {
+            const ptr: [*]const u8 = @ptrFromInt(hhdm.virtOf(@as(u64, self.mod_start)));
+            return ptr[0..self.len()];
+        }
+    };
 };
 
 // struct multiboot_mmap_entry
@@ -91,22 +129,50 @@ pub const MMAPEntry = extern struct {
     zero: u32,
 };
 
-pub fn findTag(wanted_type: TagType) ?*TagType.Tag {
-    @setRuntimeSafety(false);
-    var tag: *TagType.Tag = @ptrFromInt(@intFromPtr(mbd()) + 8);
-    const size = @as(*u32, @ptrCast(mbd())).*;
+pub const TagIterator = struct {
+    tag: *TagType.Tag,
+    end: usize,
 
-    while (@intFromPtr(tag) < @intFromPtr(mbd()) + size) {
-        if (tag.type == wanted_type)
-            return tag;
+    pub fn init() TagIterator {
+        const base = @intFromPtr(mbd());
+        return .{
+            .tag = @ptrFromInt(base + 8),
+            .end = base + @as(*u32, @ptrCast(mbd())).*,
+        };
+    }
 
-        tag = @ptrFromInt(@intFromPtr(tag) + tag.size);
+    pub fn next(self: *TagIterator) ?*TagType.Tag {
+        @setRuntimeSafety(false);
+        if (@intFromPtr(self.tag) >= self.end) return null;
+
+        const curr = self.tag;
+        if (curr.type == .end) return null;
 
         // Tags are always aligned on 8-byte boundaries.
-        const tag_align: usize = @intFromPtr(tag) % 8;
-        if (tag_align != 0) {
-            tag = @ptrFromInt(@intFromPtr(tag) + 8 - tag_align);
-        }
+        self.tag = @ptrFromInt(std.mem.alignForward(usize, @intFromPtr(curr) + curr.size, 8));
+        return curr;
+    }
+};
+
+/// Returns the first tag of the given type
+pub fn findTag(wanted_type: TagType) ?*TagType.Tag {
+    var it: TagIterator = .init();
+    while (it.next()) |tag| {
+        if (tag.type == wanted_type)
+            return tag;
+    }
+    return null;
+}
+
+/// Looks a module up by the cmdline it was given in grub.cfg.
+pub fn findModule(name: []const u8) ?*TagType.Module {
+    var it: TagIterator = .init();
+    while (it.next()) |tag| {
+        if (tag.type != .module) continue;
+
+        const mod: *TagType.Module = @ptrCast(@alignCast(tag));
+        if (std.mem.eql(u8, mod.cmdline(), name))
+            return mod;
     }
     return null;
 }
