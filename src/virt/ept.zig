@@ -468,6 +468,37 @@ pub fn readGuest(comptime T: type, guest_state: *vmx.VMState, base_addr: u64, cr
     return @bitCast(bytes);
 }
 
+/// loads an image into the guest mem at addr `base_addr`
+/// `base_addr` range is [0, total_mem_available]
+pub fn writeGuest(guest_state: *vmx.VMState, image: []const u8, base_addr: usize) error{OutOfMemory}!void {
+    if ((base_addr + image.len) >> 30 > guest_state.guest_mem_pages.len)
+        return error.OutOfMemory;
+
+    var done: usize = 0;
+    while (done < image.len) {
+        const addr = base_addr +% done;
+        const addr_in_page = addr & ((1 << 30) - 1);
+        const n = @min(image.len - done, (1 << 30) - addr_in_page);
+        const page_idx = (addr - addr_in_page) >> 30;
+        @memcpy(guest_state.guest_mem_pages[page_idx].*[addr_in_page .. addr_in_page + n], image[done .. done + n]);
+        done += n;
+    }
+}
+
+/// FIXME: edgecases of OOB not properly tested
+/// `base_addr` range is [0, total_mem_available]
+pub fn memsetGuest(guest_state: *vmx.VMState, value: u8, base_addr: usize, len: usize) !void {
+    var done: usize = 0;
+    while (done < len) {
+        const addr = base_addr +% done;
+        const addr_in_page = addr & ((1 << 30) - 1);
+        const n = @min(len - done, (1 << 30) - addr_in_page);
+        const page_idx = (addr - addr_in_page) >> 30;
+        @memset(guest_state.guest_mem_pages[page_idx].*[addr_in_page .. addr_in_page + n], value);
+        done += n;
+    }
+}
+
 /// Builds an x86-64 identity map page table for the guest, inside the guest RAM
 /// this is required because we cannot launch a guest in x86-64 without paging enabled.
 /// when booting up guests from real mode, this will not be used, but built by the guest.
