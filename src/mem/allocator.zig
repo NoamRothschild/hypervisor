@@ -35,6 +35,11 @@ pub const KAlloc = struct {
         // already handed out, kernel image included
         self.fla.reserve(0, paging.bumpBoundary());
 
+        // The multiboot info struct sits wherever GRUB dropped it, which is
+        // regularly inside this region and past bumpBoundary().
+        const mbi = mbt2.mbd();
+        self.fla.reserve(hhdm.physOf(mbi), @as(*const u32, @ptrCast(mbi)).*);
+
         const mmap_tag = mbt2.findTag(.mmap) orelse @panic("unable to find mmap tag in mb2 hdr");
         var it: mbt2.MMAPIterator = .init(@ptrCast(@alignCast(mmap_tag)));
         while (it.next()) |entry| {

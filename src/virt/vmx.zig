@@ -333,6 +333,7 @@ export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) ExitAction {
 
     debug.printf("VM EXIT REASON: {s}\n", .{@tagName(exit_reason)});
     debug.printf("EXIT QUALIFICATION: 0x{x}\n", .{exit_qualification});
+    debug.printf("EXIT ADDR: 0x{x}\n", .{vmread(.GUEST_RIP)});
 
     switch (exit_reason) {
         .vmclear,
@@ -346,16 +347,42 @@ export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) ExitAction {
         .vmlaunch,
         => {},
 
+        .exception_nmi => {
+            const intr_info = vmread(.VM_EXIT_INTR_INFO);
+            const vector = intr_info & 0xff;
+            const err_valid = (intr_info >> 11) & 1;
+            std.log.err(
+                "guest exception: vector {d} (info 0x{x}) err 0x{x}{s} at rip 0x{x}, linear 0x{x}, cr2-ish qual 0x{x}\n",
+                .{
+                    vector,
+                    intr_info,
+                    vmread(.VM_EXIT_INTR_ERROR_CODE),
+                    if (err_valid == 0) " (no err code)" else "",
+                    vmread(.GUEST_RIP),
+                    vmread(.GUEST_LINEAR_ADDRESS),
+                    exit_qualification,
+                },
+            );
+            return .exit;
+        },
+
         .cpuid => simulate.cpuid(guest_regs),
         .hlt => {
             std.log.info("user executed hlt\n", .{});
             return .exit;
         },
-        .triple_fault, .invalid_guest_state => {
+        .triple_fault => {
+            std.log.err("guest triple faulted at rip 0x{x}; not resuming\n", .{vmread(.GUEST_RIP)});
+            return .exit;
+        },
+        .invalid_guest_state => {
             std.log.err("invalid guest state; not resuming\n", .{});
             return .exit;
         },
-        else => return .@"resume",
+        else => {
+            std.log.err("unhandled exit reason: {}; not resuming\n", .{exit_reason});
+            return .exit;
+        },
     }
     return .@"resume";
 }
