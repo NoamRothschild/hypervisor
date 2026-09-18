@@ -78,6 +78,7 @@ pub const VMState = struct {
     /// msr bitmap phys addr
     msr_bitmap_phys: u64,
     guest_pml4: *align(4096) [512]ept.EPT_PML4E,
+    /// `.len` is always greater than 0
     guest_mem_pages: []*align(0x1000) [1 << 30]u8,
 
     pub const VMConfig = struct {
@@ -520,6 +521,9 @@ pub const SelectorField = enum(u64) {
     VMCS_LINK_POINTER_HIGH = 0x00002801,
     GUEST_IA32_DEBUGCTL = 0x00002802,
     GUEST_IA32_DEBUGCTL_HIGH = 0x00002803,
+    GUEST_IA32_EFER = 0x00002806,
+    GUEST_IA32_EFER_HIGH = 0x00002807,
+    HOST_IA32_EFER = 0x00002C02,
     PIN_BASED_VM_EXEC_CONTROL = 0x00004000,
     CPU_BASED_VM_EXEC_CONTROL = 0x00004002,
     EXCEPTION_BITMAP = 0x00004004,

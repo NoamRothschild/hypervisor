@@ -100,34 +100,27 @@ pub const BootParams = extern struct {
     pub const hdr_offset = 0x1f1;
 
     /// Builds the zero page from a bzImage.
-    ///
-    /// Everything is zeroed except `hdr`, which is copied out of the image.
-    /// Only the setup header is shared between the two layouts: 0x000..0x1f0 of
-    /// a bzImage is boot sector code, so copying the image's first 4KiB verbatim
-    /// would hand the kernel garbage for `screen_info`, `apm_bios_info` and the
-    /// rest. (The kernel half-defends against exactly that with the `sentinel`
-    /// byte at 0x1ef, scrubbing some fields when it is non-zero.)
-    pub fn fromBzImage(image: []const u8) error{ ImageTooSmall, NotABzImage }!BootParams {
+    /// Assumes a current kernel: every `SetupHeader` field is present.
+    pub fn fromBzImage(image: []const u8) BootParams {
         if (image.len < hdr_offset + @sizeOf(SetupHeader))
-            return error.ImageTooSmall;
+            unreachable;
 
         var bp: BootParams = undefined;
         @memset(std.mem.asBytes(&bp), 0);
 
         // the two values the kernel itself checks before trusting the header
-        if (std.mem.readInt(u16, image[0x1fe..][0..2], .little) != 0xaa55)
-            return error.NotABzImage;
-        if (std.mem.readInt(u32, image[0x202..][0..4], .little) != linux_boot_header_magic)
-            return error.NotABzImage;
+        const boot_flag = std.mem.readInt(u16, image[0x1fe..][0..2], .little);
+        if (boot_flag != 0xaa55)
+            std.debug.panic("not a bzImage: boot flag at 0x1fe is 0x{x:0>4}, want 0xaa55", .{boot_flag});
 
-        // the header ends at 0x202 plus the byte at 0x201, which is shorter than
-        // `SetupHeader` on older kernels; never copy more than either side holds
-        const header_end = 0x202 + @as(usize, image[0x201]);
-        const len = @min(header_end -| hdr_offset, @sizeOf(SetupHeader));
-        @memcpy(std.mem.asBytes(&bp.hdr)[0..len], image[hdr_offset..][0..len]);
+        const header_magic = std.mem.readInt(u32, image[0x202..][0..4], .little);
+        if (header_magic != linux_boot_header_magic)
+            std.debug.panic(
+                "not a bzImage: header magic at 0x202 is 0x{x:0>8}, want 0x{x:0>8} (HdrS)",
+                .{ header_magic, linux_boot_header_magic },
+            );
 
-        if (bp.hdr.setup_sects == 0)
-            bp.hdr.setup_sects = 4;
+        @memcpy(std.mem.asBytes(&bp.hdr), image[hdr_offset..][0..@sizeOf(SetupHeader)]);
 
         return bp;
     }
@@ -192,17 +185,6 @@ pub const SetupHeader = extern struct {
 
     /// sector size, in bytes
     pub const sector_size = 512;
-
-    pub fn from(bytes: []const u8) SetupHeader {
-        var hdr = std.mem.bytesToValue(
-            @This(),
-            bytes[0..@sizeOf(@This())],
-        );
-        if (hdr.setup_sects == 0)
-            hdr.setup_sects = 4;
-
-        return hdr;
-    }
 
     /// Get the offset of the protected-mode kernel code.
     /// Real-mode code consists of the boot sector

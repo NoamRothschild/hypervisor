@@ -9,6 +9,7 @@ const hhdm = @import("mem/hhdm.zig");
 const mem_allocator = @import("mem/allocator.zig");
 const GuestAllocator = @import("mem/guest_allocator.zig");
 const kalloc = &mem_allocator.kalloc;
+const linux = @import("virt/guest_os/linux.zig");
 
 comptime {
     _ = @import("arch/x86_64/entry.zig");
@@ -90,8 +91,13 @@ pub fn kmain() !void {
 
         defer vmx.vmxoff();
         try guest_state.prepare(&guest_alloc, .{});
-        var guest_regs: vmx.CpuState = std.mem.zeroes(vmx.CpuState);
+        try linux.load(guest_state);
+        vmx.vmwrite(.GUEST_RIP, linux.layout.kernel_base);
 
+        // the 32-bit boot protocol: esi points at the zero page, and ebx, ebp
+        // and edi must be zero
+        var guest_regs: vmx.CpuState = std.mem.zeroes(vmx.CpuState);
+        guest_regs.rsi = linux.layout.bootparam;
 
         std.log.info("launching guest...\n", .{});
         if (vmx.vmlaunch(&guest_regs)) {
