@@ -100,7 +100,7 @@ pub fn kmain() !void {
         guest_regs.rsi = linux.layout.bootparam;
 
         std.log.info("launching guest...\n", .{});
-        if (vmx.vmlaunch(&guest_regs)) {
+        if (vmx.vmlaunch(guest_state, &guest_regs)) {
             std.log.info("vm launch finished\n", .{});
         } else {
             std.log.info("vm launch finished failed\n", .{});

@@ -1,3 +1,6 @@
+const std = @import("std");
+const KAlloc = @import("../mem/allocator.zig").KAlloc;
+
 pub inline fn rdmsr(msr_id: All) u64 {
     var low: u32 = undefined;
     var high: u32 = undefined;
@@ -34,6 +37,7 @@ pub const All = enum(u32) {
     SMI_COUNT = 0x00000034,
     IA32_FEATURE_CONTROL = 0x0000003a,
     IA32_TSC_ADJUST = 0x0000003b,
+    IA32_MISC_ENABLE = 0x000001a0,
     IA32_BNDCFGS = 0x00000d90,
     IA32_DEBUGCTLMSR = 0x000001d9,
     IA32_LASTBRANCHFROMIP = 0x000001db,
@@ -74,6 +78,97 @@ pub const All = enum(u32) {
     pub fn read(self: @This()) u64 {
         return rdmsr(self);
     }
+};
+
+pub const MsrArea = struct {
+    /// max entries in a 4KB page
+    const max_entries = 512;
+
+    pub const Entry = packed struct(u128) {
+        index: u32,
+        rsvd: u32 = 0,
+        data: u64,
+    };
+
+    entries: []Entry,
+    /// number of registered MSR entries
+    registered_entries: usize = 0,
+
+    pub fn init(alloc: *KAlloc) error{OutOfMemory}!MsrArea {
+        const entries: *[max_entries]Entry = @ptrCast(try alloc.allocPage());
+        @memset(entries.*[0..], std.mem.zeroes(Entry));
+        return .{ .entries = entries };
+    }
+
+    pub fn set(self: *MsrArea, index: All, data: u64) void {
+        return self.setByIndex(@intFromEnum(index), data);
+    }
+
+    pub fn setByIndex(self: *MsrArea, index: u32, data: u64) void {
+        for (self.entries[0..self.registered_entries]) |*e| {
+            if (e.index == index) {
+                e.data = data;
+                return;
+            }
+        }
+        if (self.registered_entries + 1 > max_entries)
+            @panic("Too many MSR entries registered");
+
+        defer self.registered_entries += 1;
+        self.entries[self.registered_entries] = .{
+            .index = index,
+            .data = data,
+        };
+    }
+
+    pub fn savedMsrs(self: *MsrArea) []Entry {
+        return self.entries[0..self.registered_entries];
+    }
+
+    pub fn find(self: *MsrArea, index: All) ?*Entry {
+        for (self.entries[0..self.registered_entries]) |*e| {
+            if (e.index == @intFromEnum(index))
+                return e;
+        }
+        return null;
+    }
+
+    pub fn phys(self: *MsrArea) u64 {
+        return @import("../mem/hhdm.zig").physOf(self.entries.ptr);
+    }
+};
+
+/// Model specific feature switches. Mostly read-only from our point of view:
+/// the guest gets a shadow copy, nothing here is written to real hardware.
+pub const IA32_MISC_ENABLE = packed struct(u64) {
+    /// Fast-strings (REP MOVS/STOS) enable.
+    fast_strings: u1,
+    rsvd1: u2 = 0,
+    /// Automatic thermal control circuit enable.
+    automatic_thermal_control: u1,
+    rsvd2: u3 = 0,
+    /// Performance monitoring is available. (read-only)
+    perfmon_available: u1,
+    rsvd3: u3 = 0,
+    /// Branch trace storage is *not* available. (read-only)
+    bts_unavailable: u1,
+    /// Precise event based sampling is *not* available. (read-only)
+    pebs_unavailable: u1,
+    rsvd4: u3 = 0,
+    /// Enhanced Intel SpeedStep technology enable.
+    enhanced_speedstep: u1,
+    rsvd5: u1 = 0,
+    /// MONITOR/MWAIT enable. Mirrored by CPUID.01H:ECX[3].
+    enable_monitor_fsm: u1,
+    rsvd6: u3 = 0,
+    /// Report only leaves up to 2 from CPUID's basic leaves.
+    limit_cpuid_maxval: u1,
+    /// xTPR messages disable.
+    xtpr_message_disable: u1,
+    rsvd7: u10 = 0,
+    /// Execute disable bit (`EFER.NXE`) unavailable.
+    xd_bit_disable: u1,
+    rsvd8: u29 = 0,
 };
 
 pub const IA32_FEATURE_CONTROL = packed struct(u64) {

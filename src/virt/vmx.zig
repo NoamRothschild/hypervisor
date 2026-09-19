@@ -62,6 +62,8 @@ pub fn enableOperation() void {
         : .{ .memory = true });
 }
 
+pub var running_guest: *VMState = undefined;
+
 pub const VMState = struct {
     /// phys addr
     vmxon_region: u64,
@@ -80,6 +82,9 @@ pub const VMState = struct {
     guest_pml4: *align(4096) [512]ept.EPT_PML4E,
     /// `.len` is always greater than 0
     guest_mem_pages: []*align(0x1000) [1 << 30]u8,
+
+    host_msr: msr.MsrArea,
+    guest_msr: msr.MsrArea,
 
     pub const VMConfig = struct {
         os: enum { linux, windows } = .linux,
@@ -127,9 +132,9 @@ pub const VMState = struct {
         const msr_bitmap_page = try mem_allocator.kalloc.allocPage();
         self.msr_bitmap = msr_bitmap_page;
         self.msr_bitmap_phys = hhdm.physOf(msr_bitmap_page);
-        @memset(msr_bitmap_page.*[0..], @as(u8, 0));
+        @memset(msr_bitmap_page.*[0..], 0xff);
 
-        try vmcs.setup(self, eptp);
+        try vmcs.setup(self, &mem_allocator.kalloc, eptp);
     }
 };
 
@@ -185,7 +190,10 @@ pub fn vmxoff() void {
 ///
 /// returns either if vmlaunch failed
 /// or when after the VM caused an exit (will block)
-pub fn vmlaunch(guest_regs: *const CpuState) bool {
+pub fn vmlaunch(guest_state: *VMState, guest_regs: *const CpuState) bool {
+    running_guest = guest_state;
+    vmcs.updateMsrs(guest_state);
+
     const ret = asm volatile ("call __vmlaunch"
         : [ret] "={al}" (-> u8),
         : [regs] "{rdi}" (guest_regs),
@@ -347,6 +355,15 @@ export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) ExitAction {
         .vmlaunch,
         => {},
 
+        .msr_read => {
+            simulate.rdmsr(running_guest, guest_regs);
+            return .@"resume";
+        },
+        .msr_write => {
+            simulate.wrmsr(running_guest, guest_regs);
+            return .@"resume";
+        },
+
         .exception_nmi => {
             const intr_info = vmread(.VM_EXIT_INTR_INFO);
             const vector = intr_info & 0xff;
@@ -439,6 +456,25 @@ pub const CpuState = extern struct {
     rdx: u64,
     rcx: u64,
     rax: u64,
+
+    pub inline fn eax(self: *CpuState) *u32 {
+        return @ptrCast(&self.rax);
+    }
+    pub inline fn ebx(self: *CpuState) *u32 {
+        return @ptrCast(&self.rbx);
+    }
+    pub inline fn ecx(self: *CpuState) *u32 {
+        return @ptrCast(&self.rcx);
+    }
+    pub inline fn edx(self: *CpuState) *u32 {
+        return @ptrCast(&self.rdx);
+    }
+    pub inline fn esi(self: *CpuState) *u32 {
+        return @ptrCast(&self.rsi);
+    }
+    pub inline fn edi(self: *CpuState) *u32 {
+        return @ptrCast(&self.rdi);
+    }
 };
 
 pub const ExitReason = enum(u64) {

@@ -7,6 +7,7 @@ const mem_allocator = @import("../mem/allocator.zig");
 const gdt = @import("../arch/x86_64/gdt.zig");
 const idt = @import("../arch/x86_64/idt.zig");
 const ept = @import("ept.zig");
+const KAlloc = @import("../mem/allocator.zig").KAlloc;
 const GuestAllocator = @import("../mem/guest_allocator.zig");
 const VMState = vmx.VMState;
 const rdmsr = msr.rdmsr;
@@ -90,7 +91,7 @@ pub fn load(vmstate: *VMState) bool {
     return true;
 }
 
-pub fn setup(vmstate: *VMState, eptp: ept.EPTP) !void {
+pub fn setup(vmstate: *VMState, kalloc: *KAlloc, eptp: ept.EPTP) !void {
     vmwriteAsm(.HOST_ES_SELECTOR,
         \\ mov %es, %rbx
         \\ and $0xf8, %rbx
@@ -172,12 +173,16 @@ pub fn setup(vmstate: *VMState, eptp: ept.EPTP) !void {
         .optional(.VM_EXIT_ACK_INTR_ON_EXIT),
         // restores the host's EFER, since the guest runs with EFER=0
         .required(.VM_EXIT_LOAD_IA32_EFER, error.EferControlsUnsupported),
+        .optional(.VM_EXIT_SAVE_IA32_EFER),
+        .optional(.VM_EXIT_LOAD_HOST_PAT),
+        .optional(.VM_EXIT_SAVE_GUEST_PAT),
     }));
 
     vmwrite(.VM_ENTRY_CONTROLS, try adjustControls(VmEntryControl, .IA32_VMX_ENTRY_CTLS, &.{
         // no IA32E_MODE: the guest enters in 32-bit protected mode and brings up
         // long mode itself
         .required(.VM_ENTRY_LOAD_IA32_EFER, error.EferControlsUnsupported),
+        .optional(.VM_ENTRY_LOAD_GUEST_PAT),
     }));
 
     setupGuestControlRegs();
@@ -207,6 +212,7 @@ pub fn setup(vmstate: *VMState, eptp: ept.EPTP) !void {
     vmwrite(.GUEST_RFLAGS, 0x2);
 
     vmwrite(.MSR_BITMAP, vmstate.msr_bitmap_phys);
+    try setupMsrs(vmstate, kalloc);
 
     vmwrite(.GUEST_SYSENTER_CS, rdmsr(.IA32_SYSENTER_CS));
     vmwrite(.GUEST_SYSENTER_EIP, rdmsr(.IA32_SYSENTER_EIP));
@@ -278,6 +284,52 @@ fn adjustControls(comptime CtrlType: type, by_msr: msr.All, specs: []const Contr
             return err;
     }
     return all_ctrl;
+}
+
+fn setupMsrs(guest_state: *vmx.VMState, alloc: *KAlloc) error{OutOfMemory}!void {
+    guest_state.host_msr = try .init(alloc);
+    guest_state.guest_msr = try .init(alloc);
+
+    const hm = &guest_state.host_msr;
+    const gm = &guest_state.guest_msr;
+
+    // host msrs
+    hm.set(.TSC_AUX, rdmsr(.TSC_AUX));
+    hm.set(.STAR, rdmsr(.STAR));
+    hm.set(.LSTAR, rdmsr(.LSTAR));
+    hm.set(.CSTAR, rdmsr(.CSTAR));
+    hm.set(.SYSCALL_MASK, rdmsr(.SYSCALL_MASK));
+    hm.set(.KERNEL_GS_BASE, rdmsr(.KERNEL_GS_BASE));
+
+    // guest msrs
+    gm.set(.TSC_AUX, 0);
+    gm.set(.STAR, 0);
+    gm.set(.LSTAR, 0);
+    gm.set(.CSTAR, 0);
+    gm.set(.SYSCALL_MASK, 0);
+    gm.set(.KERNEL_GS_BASE, 0);
+
+    const hm_low: u32 = @truncate(hm.phys());
+    const hm_high: u32 = @truncate(hm.phys() >> 32);
+
+    const gm_low: u32 = @truncate(gm.phys());
+    const gm_high: u32 = @truncate(gm.phys() >> 32);
+
+    vmwrite(.VM_EXIT_MSR_LOAD_ADDR, hm_low);
+    vmwrite(.VM_EXIT_MSR_STORE_ADDR, gm_low);
+    vmwrite(.VM_ENTRY_MSR_LOAD_ADDR, gm_low);
+    vmwrite(.VM_EXIT_MSR_LOAD_ADDR_HIGH, hm_high);
+    vmwrite(.VM_EXIT_MSR_STORE_ADDR_HIGH, gm_high);
+    vmwrite(.VM_ENTRY_MSR_LOAD_ADDR_HIGH, gm_high);
+}
+
+pub fn updateMsrs(guest_state: *vmx.VMState) void {
+    for (guest_state.host_msr.savedMsrs()) |e|
+        guest_state.host_msr.setByIndex(e.index, rdmsr(@enumFromInt(e.index)));
+
+    vmwrite(.VM_EXIT_MSR_LOAD_COUNT, guest_state.host_msr.registered_entries);
+    vmwrite(.VM_EXIT_MSR_STORE_COUNT, guest_state.guest_msr.registered_entries);
+    vmwrite(.VM_ENTRY_MSR_LOAD_COUNT, guest_state.guest_msr.registered_entries);
 }
 
 fn setGuestSegment(seg_reg: SegReg, selector: u16, base: u64, limit: u32, access_rights: u32) void {
