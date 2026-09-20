@@ -334,9 +334,11 @@ export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) ExitAction {
         .backing_int = vmread(.EXIT_QUALIFICATION),
     };
 
-    debug.printf("VM EXIT REASON: {s}\n", .{@tagName(exit_reason)});
-    debug.printf("EXIT QUALIFICATION: 0x{x}\n", .{exit_qual.backing_int});
-    debug.printf("EXIT ADDR: 0x{x}\n", .{vmread(.GUEST_RIP)});
+    std.log.info("vm exit! info: .{{ .reason = {s}, .qual = 0x{x}, .addr = 0x{x} }}\n", .{
+        @tagName(exit_reason),
+        exit_qual.backing_int,
+        vmread(.GUEST_RIP),
+    });
 
     switch (exit_reason) {
         .vmclear,

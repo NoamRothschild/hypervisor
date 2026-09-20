@@ -71,7 +71,6 @@ pub fn e820(guest_state: *vmx.VMState, guest_regs: *CpuState) void {
 }
 
 pub fn rdmsr(guest_state: *vmx.VMState, guest_regs: *CpuState) void {
-    debug.printf("msr tag: 0x{x}\n", .{guest_regs.rcx});
     const msr_kind: msr.All = @enumFromInt(guest_regs.rcx);
 
     const val: u64 = switch (msr_kind) {
@@ -95,6 +94,7 @@ pub fn rdmsr(guest_state: *vmx.VMState, guest_regs: *CpuState) void {
             };
             break :blk e.data;
         },
+        _ => std.debug.panic("Unhandled RDMSR for 0x{x}\n", .{@intFromEnum(msr_kind)}),
         else => std.debug.panic("Unhandled RDMSR for {s}\n", .{@tagName(msr_kind)}),
     };
 

@@ -74,6 +74,7 @@ pub const All = enum(u32) {
     IA32_SYSENTER_CS = 0x00000174,
     IA32_SYSENTER_ESP = 0x00000175,
     IA32_SYSENTER_EIP = 0x00000176,
+    _,
 
     pub fn read(self: @This()) u64 {
         return rdmsr(self);
