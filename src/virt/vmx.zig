@@ -42,15 +42,8 @@ pub fn enableOperation() void {
         : [cr4] "=r" (cr4),
     );
 
-    const cr0_fixed0 = rdmsr(.IA32_VMX_CR0_FIXED0);
-    const cr0_fixed1 = rdmsr(.IA32_VMX_CR0_FIXED1);
-    const cr4_fixed0 = rdmsr(.IA32_VMX_CR4_FIXED0);
-    const cr4_fixed1 = rdmsr(.IA32_VMX_CR4_FIXED1);
-
-    cr0 |= cr0_fixed0;
-    cr0 &= cr0_fixed1;
-    cr4 |= cr4_fixed0;
-    cr4 &= cr4_fixed1;
+    adjustCr0(&cr0);
+    adjustCr4(&cr4);
 
     asm volatile ("mov %[cr0], %%cr0"
         :
@@ -337,10 +330,12 @@ pub const ExitAction = enum(u8) {
 /// Returns what the VMM should do next, see `ExitAction`.
 export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) ExitAction {
     const exit_reason: ExitReason = @enumFromInt(vmread(.VM_EXIT_REASON) & 0xffff);
-    const exit_qualification = vmread(.EXIT_QUALIFICATION);
+    const exit_qual: ExitQualification = .{
+        .backing_int = vmread(.EXIT_QUALIFICATION),
+    };
 
     debug.printf("VM EXIT REASON: {s}\n", .{@tagName(exit_reason)});
-    debug.printf("EXIT QUALIFICATION: 0x{x}\n", .{exit_qualification});
+    debug.printf("EXIT QUALIFICATION: 0x{x}\n", .{exit_qual.backing_int});
     debug.printf("EXIT ADDR: 0x{x}\n", .{vmread(.GUEST_RIP)});
 
     switch (exit_reason) {
@@ -364,6 +359,11 @@ export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) ExitAction {
             return .@"resume";
         },
 
+        .cr_access => {
+            simulate.crAccess(guest_regs, exit_qual.cr);
+            return .@"resume";
+        },
+
         .exception_nmi => {
             const intr_info = vmread(.VM_EXIT_INTR_INFO);
             const vector = intr_info & 0xff;
@@ -377,7 +377,7 @@ export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) ExitAction {
                     if (err_valid == 0) " (no err code)" else "",
                     vmread(.GUEST_RIP),
                     vmread(.GUEST_LINEAR_ADDRESS),
-                    exit_qualification,
+                    exit_qual.backing_int,
                 },
             );
             return .exit;
@@ -440,6 +440,22 @@ pub inline fn vmwrite(selector: SelectorField, value: u64) void {
         : .{ .rbx = true, .rax = true });
 }
 
+pub fn adjustCr0(cr0: *u64) void {
+    const cr0_fixed0 = rdmsr(.IA32_VMX_CR0_FIXED0);
+    const cr0_fixed1 = rdmsr(.IA32_VMX_CR0_FIXED1);
+
+    cr0.* |= cr0_fixed0;
+    cr0.* &= cr0_fixed1;
+}
+
+pub fn adjustCr4(cr4: *u64) void {
+    const cr4_fixed4 = rdmsr(.IA32_VMX_CR4_FIXED0);
+    const cr4_fixed1 = rdmsr(.IA32_VMX_CR4_FIXED1);
+
+    cr4.* |= cr4_fixed4;
+    cr4.* &= cr4_fixed1;
+}
+
 pub const CpuState = extern struct {
     r15: u64,
     r14: u64,
@@ -475,6 +491,67 @@ pub const CpuState = extern struct {
     pub inline fn edi(self: *CpuState) *u32 {
         return @ptrCast(&self.rdi);
     }
+};
+
+pub const ExitQualification = packed union(u64) {
+    backing_int: u64,
+    cr: Cr,
+
+    pub const Cr = packed struct(u64) {
+        index: u4,
+        access_type: AccessType,
+        lmsw_type: LmswOperandType,
+        rsvd1: u1,
+        reg: Register,
+        rsvd2: u4,
+        lmsw_source: u16,
+        rsvd3: u32,
+
+        const AccessType = enum(u2) {
+            mov_to = 0,
+            mov_from = 1,
+            clts = 2,
+            lmsw = 3,
+        };
+        const LmswOperandType = enum(u1) {
+            reg = 0,
+            mem = 1,
+        };
+        const Register = enum(u4) {
+            rax = 0,
+            rcx = 1,
+            rdx = 2,
+            rbx = 3,
+            rsp = 4,
+            rbp = 5,
+            rsi = 6,
+            rdi = 7,
+            r8 = 8,
+            r9 = 9,
+            r10 = 10,
+            r11 = 11,
+            r12 = 12,
+            r13 = 13,
+            r14 = 14,
+            r15 = 15,
+        };
+
+        /// writes `value` into the register the exiting `mov to cr` read from
+        pub fn setVal(self: @This(), regs: *CpuState, value: u64) void {
+            switch (self.reg) {
+                .rsp => vmwrite(.GUEST_RSP, value),
+                inline else => |reg| @field(regs.*, @tagName(reg)) = value,
+            }
+        }
+
+        /// reads the reg indicated by the `Register` field
+        pub fn getVal(self: @This(), regs: *CpuState) u64 {
+            return switch (self.reg) {
+                .rsp => vmread(.GUEST_RSP),
+                inline else => |v| @field(regs.*, @tagName(v)),
+            };
+        }
+    };
 };
 
 pub const ExitReason = enum(u64) {

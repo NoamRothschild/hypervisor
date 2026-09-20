@@ -450,6 +450,32 @@ pub fn guestVirtToHostVirt(guest_state: *vmx.VMState, guest_cr3: u64, vaddr: u64
     return guestPhysToHostVirt(guest_state, pte.physAddr() | (vaddr & 0xfff), false);
 }
 
+pub const InvEptDescriptor = packed struct(u128) {
+    /// host phys addr
+    eptp: u64,
+    rsvd: u64 = 0,
+};
+
+pub const InvEptType = enum(u64) {
+    /// Invalidates EPT-derived TLB mappings and paging-structure caches
+    /// associated only with the specific EPTP address provided in the descriptor.
+    single_context = 1,
+
+    /// Invalidates EPT-derived TLB mappings and paging-structure caches
+    /// across ALL EPTP contexts globally.
+    global_context = 2,
+};
+
+/// eptp is host phys addr
+pub fn invept(invept_type: InvEptType, eptp: u64) void {
+    const desc: InvEptDescriptor = .{ .eptp = eptp };
+    asm volatile ("invept (%[desc]), %[type]"
+        :
+        : [type] "r" (@intFromEnum(invept_type)),
+          [desc] "r" (&desc),
+        : .{ .memory = true });
+}
+
 /// copies a `T` out of guest-virtual memory.
 /// handles unaligned addresses and values that straddle a page boundary.
 pub fn readGuest(comptime T: type, guest_state: *vmx.VMState, base_addr: u64, cr3_if_virt: ?u64) !T {

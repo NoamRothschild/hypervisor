@@ -392,9 +392,10 @@ fn setupGuestControlRegs() void {
     vmwrite(.GUEST_CR3, 0);
 
     // let the guest own CR0 (it needs to set PG itself), but hide CR4.VMXE
-    vmwrite(.CR0_GUEST_HOST_MASK, 0);
+    vmwrite(.CR0_GUEST_HOST_MASK, std.math.maxInt(u64));
+    vmwrite(.CR4_GUEST_HOST_MASK, std.math.maxInt(u64));
     vmwrite(.CR0_READ_SHADOW, guest_cr0);
-    vmwrite(.CR4_GUEST_HOST_MASK, cr4_vmxe);
+    // VMXE is forced on in the guest field, but the guest must not see it
     vmwrite(.CR4_READ_SHADOW, guest_cr4 & ~cr4_vmxe);
 
     // the guest starts in 32-bit protected mode: no LME, no LMA

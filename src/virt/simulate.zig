@@ -125,3 +125,5 @@ pub fn wrmsr(guest_state: *vmx.VMState, guest_regs: *CpuState) void {
         else => std.debug.panic("Unhandled WRMSR for {s}\n", .{@tagName(msr_kind)}),
     }
 }
+
+pub const crAccess = @import("cr.zig").crAccess;

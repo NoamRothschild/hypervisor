@@ -192,6 +192,32 @@ pub const IA32_FEATURE_CONTROL = packed struct(u64) {
     rsvd4: u43,
 };
 
+/// IA32_EFER MSR.
+pub const Efer = packed struct(u64) {
+    /// System call extensions.
+    sce: bool,
+    /// ReservedZ.
+    reserved1: u7 = 0,
+    /// Long mode enable.
+    lme: bool,
+    ///
+    ignored: bool,
+    /// Long mode active.
+    lma: bool,
+    /// No execute enable.
+    nxe: bool,
+    /// Secure virtual machine enable.
+    svme: bool,
+    /// Long mode segment limit enable.
+    lmsle: bool,
+    /// Fast FXSAVE/FXRSTOR.
+    ffxsr: bool,
+    /// Translation cache extension.
+    tce: bool,
+    /// ReservedZ.
+    reserved2: u48 = 0,
+};
+
 /// Reports which EPT and VPID capabilities the processor supports.
 /// Only meaningful when the secondary controls allow EPT or VPID.
 pub const IA32_VMX_EPT_VPID_CAP = packed struct(u64) {
