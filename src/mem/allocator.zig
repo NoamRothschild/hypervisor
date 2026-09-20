@@ -22,6 +22,34 @@ pub const KAlloc = struct {
     /// 4KB-aligned pool, carved out of `fla` on init
     pages: PageBitmap,
 
+    /// A physical range kept out of the free list, in `fla`-relative bytes.
+    const Range = struct {
+        start: u64,
+        end: u64,
+
+        fn lessThan(_: void, a: Range, b: Range) bool {
+            return a.start < b.start;
+        }
+    };
+
+    /// bump region + multiboot info + firmware mmap holes + bootloader modules
+    const max_reserved_ranges = 64;
+
+    /// Clamps `[start, start + len)` to the arena and appends it, dropping
+    /// anything empty. Overflowing the array would silently hand reserved
+    /// memory to the allocator, so it is fatal.
+    fn addRange(list: *[max_reserved_ranges]Range, count: *usize, start: u64, len: u64, limit: u64) void {
+        const s = @min(start, limit);
+        const e = @min(start +| len, limit);
+        if (e <= s) return;
+
+        if (count.* == list.len)
+            @panic("kalloc: too many reserved ranges");
+
+        list[count.*] = .{ .start = s, .end = e };
+        count.* += 1;
+    }
+
     /// Initializes `self` in place -- the page pool keeps a pointer to
     /// `self.fla`, so a `KAlloc` must not be moved once initialized.
     pub fn init(self: *KAlloc) void {
@@ -31,14 +59,22 @@ pub const KAlloc = struct {
             .pages = undefined,
         };
 
-        // Exclude everything `paging`'s boot-time bump allocator has
-        // already handed out, kernel image included
-        self.fla.reserve(0, paging.bumpBoundary());
+        // Every range has to be known before any of them is carved out.
+        // `reserve` writes its bookkeeping node into the first free byte
+        // following a carved range, so reserving an overlapping range later
+        // leaves that node sitting inside memory that was meant to stay
+        // untouched.
+        var ranges: [max_reserved_ranges]Range = undefined;
+        var range_count: usize = 0;
 
-        // The multiboot info struct sits wherever GRUB dropped it, which is
+        // everything `paging`'s boot-time bump allocator has already handed
+        // out, kernel image included
+        addRange(&ranges, &range_count, 0, paging.bumpBoundary(), buf.len);
+
+        // the multiboot info struct sits wherever GRUB dropped it, which is
         // regularly inside this region and past bumpBoundary().
         const mbi = mbt2.mbd();
-        self.fla.reserve(hhdm.physOf(mbi), @as(*const u32, @ptrCast(mbi)).*);
+        addRange(&ranges, &range_count, hhdm.physOf(mbi), @as(*const u32, @ptrCast(mbi)).*, buf.len);
 
         const mmap_tag = mbt2.findTag(.mmap) orelse @panic("unable to find mmap tag in mb2 hdr");
         var it: mbt2.MMAPIterator = .init(@ptrCast(@alignCast(mmap_tag)));
@@ -47,7 +83,7 @@ pub const KAlloc = struct {
                 break;
 
             if (entry.type != .mem_available)
-                self.fla.reserve(entry.addr, entry.len);
+                addRange(&ranges, &range_count, entry.addr, entry.len, buf.len);
         }
 
         var tags: mbt2.TagIterator = .init();
@@ -55,7 +91,22 @@ pub const KAlloc = struct {
             if (tag.type != .module) continue;
 
             const mod: *const mbt2.TagType.Module = @ptrCast(@alignCast(tag));
-            self.fla.reserve(mod.mod_start, mod.len());
+            addRange(&ranges, &range_count, mod.mod_start, mod.len(), buf.len);
+        }
+
+        std.mem.sort(Range, ranges[0..range_count], {}, Range.lessThan);
+
+        var i: usize = 0;
+        while (i < range_count) : (i += 1) {
+            const start = ranges[i].start;
+            var end = ranges[i].end;
+            // fold in every range overlapping or touching this one, so the
+            // node written at `end` cannot land inside a later reservation
+            while (i + 1 < range_count and ranges[i + 1].start <= end) {
+                i += 1;
+                end = @max(end, ranges[i].end);
+            }
+            self.fla.reserve(start, end - start);
         }
 
         // the pool itself and the bitmap tracking it both live inside `fla`
