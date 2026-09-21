@@ -83,6 +83,8 @@ pub fn setup(vcpu: *Vcpu, kalloc: *KAlloc, eptp: ept.EPTP) !void {
 
     vmwrite(.SECONDARY_VM_EXEC_CONTROL, try adjustControls(SecondaryVmExecutionControl, .IA32_VMX_PROCBASED_CTLS2, &.{
         .optional(.CPU_BASED_CTL2_RDTSCP),
+        // cpuid advertises INVPCID, without this the guest's INVPCID raises #UD
+        .required(.CPU_BASED_CTL2_ENABLE_INVPCID, error.InvpcidUnsupported),
         .required(.CPU_BASED_CTL2_ENABLE_EPT, error.EptUnsupported),
         // without this, IA32_VMX_CR0_FIXED0 forces guest CR0.PE and CR0.PG to 1, and
         // a guest entered with paging off (so it can build its own) cannot be launched
@@ -331,6 +333,7 @@ pub const SecondaryVmExecutionControl = enum(u32) {
     CPU_BASED_CTL2_ENABLE_EPT = 0x2,
     CPU_BASED_CTL2_RDTSCP = 0x8,
     CPU_BASED_CTL2_ENABLE_VPID = 0x20,
+    CPU_BASED_CTL2_ENABLE_INVPCID = 0x1000,
     CPU_BASED_CTL2_UNRESTRICTED_GUEST = 0x80,
     CPU_BASED_CTL2_ENABLE_VMFUNC = 0x2000,
 };

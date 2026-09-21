@@ -9,50 +9,7 @@ const vmread = vmx.vmread;
 const vmwrite = vmx.vmwrite;
 const Vcpu = @import("vcpu.zig").Vcpu;
 
-pub fn cpuid(vcpu: *Vcpu) void {
-    const guest_regs = vcpu.regs;
-    var eax: u32 = undefined;
-    var ebx: u32 = undefined;
-    var ecx: u32 = undefined;
-    var edx: u32 = undefined;
-    const leaf: u32 = @truncate(guest_regs.rax);
-    const subleaf: u32 = @truncate(guest_regs.rcx);
-
-    if (leaf >= 0x40000000 and leaf <= 0x4fffffff) {
-        // TODO: fixme: move bellow sig to a move visible place place,
-        // instead of hardcoding it in simulate.cpuid
-        const sig = "NoamRTD HV\x00\x00".*;
-        const is_base = leaf == 0x40000000;
-        guest_regs.rax = if (is_base) 0x40000000 else 0;
-        guest_regs.rbx = if (is_base) std.mem.readInt(u32, sig[0..4], .little) else 0;
-        guest_regs.rcx = if (is_base) std.mem.readInt(u32, sig[4..8], .little) else 0;
-        guest_regs.rdx = if (is_base) std.mem.readInt(u32, sig[8..12], .little) else 0;
-        return;
-    }
-
-    asm volatile ("cpuid"
-        : [eax] "={eax}" (eax),
-          [ebx] "={ebx}" (ebx),
-          [ecx] "={ecx}" (ecx),
-          [edx] "={edx}" (edx),
-        : [leaf] "{eax}" (leaf),
-          [subleaf] "{ecx}" (subleaf),
-    );
-
-    // get features: ecx is the low half of `CpuFeatures`, edx the high half
-    if (leaf == 1) {
-        ecx &= ~(@as(u32, 1) << @bitOffsetOf(debug.CpuFeatures, "vmx"));
-        ecx |= @as(u32, 1) << @bitOffsetOf(debug.CpuFeatures, "hypervisor");
-        // no MTRRs: Linux then skips MTRR setup and never touches those MSRs
-        edx &= ~(@as(u32, 1) << (@bitOffsetOf(debug.CpuFeatures, "mtrr") - 32));
-    }
-
-    // in 64-bit mode cpuid clears the upper halves of all four registers
-    guest_regs.rax = eax;
-    guest_regs.rbx = ebx;
-    guest_regs.rcx = ecx;
-    guest_regs.rdx = edx;
-}
+pub const cpuid = @import("cpuid.zig").cpuid;
 
 /// pops `@sizeOf(T)` bytes from the stack into return value.
 pub fn pop(comptime T: type, guest_state: *vmx.VMState, cr3_if_virt: ?ept.GuestPhys) !T {
@@ -88,6 +45,8 @@ pub fn rdmsr(vcpu: *Vcpu) error{Aborted}!void {
 
     const val: u64 = switch (msr_kind) {
         .IA32_TSC_ADJUST => vcpu.shadow_msrs.tsc_adjust,
+        .IA32_FEATURE_CONTROL => vcpu.shadow_msrs.feature_control,
+        .MISC_FEATURES_ENABLES => 0, // RAZ, cpuid faulting is not emulated
         .IA32_MCG_CAP => msr.mc_bank_count, // count only, no MCG_CTL_P/extended features
         .EFER => vmread(.GUEST_IA32_EFER) | (vmread(.GUEST_IA32_EFER_HIGH) << 32),
         .FS_BASE => vmread(.GUEST_FS_BASE),
@@ -120,6 +79,7 @@ pub fn rdmsr(vcpu: *Vcpu) error{Aborted}!void {
             break :blk msr.rdmsr(.IA32_UCODE_REV);
         },
         .IA32_ARCH_CAPABILITIES => msr.rdmsr(.IA32_ARCH_CAPABILITIES),
+        .IA32_PLATFORM_ID => msr.rdmsr(.IA32_PLATFORM_ID),
         _ => if (msr.isMcBankMsr(guest_regs.ecx().*))
             0 // RAZ
         else
@@ -151,6 +111,7 @@ pub fn wrmsr(vcpu: *Vcpu) error{Aborted}!void {
             vmwrite(.GUEST_IA32_EFER_HIGH, val >> 32);
         },
         .IA32_TSC_ADJUST => vcpu.shadow_msrs.tsc_adjust = val, // shadow only, TSC_OFFSET is not touched
+        .IA32_FEATURE_CONTROL => {}, // locked, so WI (real hardware would #GP)
         .GS_BASE => vmwrite(.GUEST_GS_BASE, val),
         .FS_BASE => vmwrite(.GUEST_FS_BASE, val),
         .IA32_UCODE_REV => {

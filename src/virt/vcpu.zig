@@ -29,6 +29,8 @@ pub const Vcpu = struct {
     /// software-only MSR values. not in `guest_msr`, that area is loaded into the real MSRs on entry.
     shadow_msrs: struct {
         tsc_adjust: u64 = 0,
+        /// locked with nothing enabled: VMX is hidden from the guest, so VMXON stays disabled
+        feature_control: u64 = 1,
     },
 
     /// the guest's general purpose registers.
@@ -326,7 +328,7 @@ pub const Vcpu = struct {
                 return .exit;
             },
 
-            .cpuid => simulate.cpuid(self),
+            .cpuid => try simulate.cpuid(self),
             .hlt => {
                 std.log.info("user executed hlt\n", .{});
                 return .exit;
