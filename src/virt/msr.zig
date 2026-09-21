@@ -75,12 +75,23 @@ pub const All = enum(u32) {
     IA32_SYSENTER_CS = 0x00000174,
     IA32_SYSENTER_ESP = 0x00000175,
     IA32_SYSENTER_EIP = 0x00000176,
+    IA32_UCODE_REV = 0x0000008b,
+    IA32_ARCH_CAPABILITIES = 0x0000010a,
+    IA32_MCG_CAP = 0x00000179,
     _,
 
     pub fn read(self: @This()) u64 {
         return rdmsr(self);
     }
 };
+
+/// machine check error banks reported in IA32_MCG_CAP, their MSRs are RAZ/WI
+pub const mc_bank_count = 4;
+
+/// MCi_CTL/STATUS/ADDR/MISC of each bank live at 0x400 + 4 * bank + {0..3}
+pub fn isMcBankMsr(id: u32) bool {
+    return id >= 0x400 and id < 0x400 + 4 * mc_bank_count;
+}
 
 pub const MsrArea = struct {
     /// max entries in a 4KB page

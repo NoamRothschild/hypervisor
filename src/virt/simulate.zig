@@ -18,6 +18,18 @@ pub fn cpuid(vcpu: *Vcpu) void {
     const leaf: u32 = @truncate(guest_regs.rax);
     const subleaf: u32 = @truncate(guest_regs.rcx);
 
+    if (leaf >= 0x40000000 and leaf <= 0x4fffffff) {
+        // TODO: fixme: move bellow sig to a move visible place place,
+        // instead of hardcoding it in simulate.cpuid
+        const sig = "NoamRTD HV\x00\x00".*;
+        const is_base = leaf == 0x40000000;
+        guest_regs.rax = if (is_base) 0x40000000 else 0;
+        guest_regs.rbx = if (is_base) std.mem.readInt(u32, sig[0..4], .little) else 0;
+        guest_regs.rcx = if (is_base) std.mem.readInt(u32, sig[4..8], .little) else 0;
+        guest_regs.rdx = if (is_base) std.mem.readInt(u32, sig[8..12], .little) else 0;
+        return;
+    }
+
     asm volatile ("cpuid"
         : [eax] "={eax}" (eax),
           [ebx] "={ebx}" (ebx),
@@ -27,10 +39,12 @@ pub fn cpuid(vcpu: *Vcpu) void {
           [subleaf] "{ecx}" (subleaf),
     );
 
-    // get features: ecx is the low half of `CpuFeatures`
+    // get features: ecx is the low half of `CpuFeatures`, edx the high half
     if (leaf == 1) {
         ecx &= ~(@as(u32, 1) << @bitOffsetOf(debug.CpuFeatures, "vmx"));
         ecx |= @as(u32, 1) << @bitOffsetOf(debug.CpuFeatures, "hypervisor");
+        // no MTRRs: Linux then skips MTRR setup and never touches those MSRs
+        edx &= ~(@as(u32, 1) << (@bitOffsetOf(debug.CpuFeatures, "mtrr") - 32));
     }
 
     // in 64-bit mode cpuid clears the upper halves of all four registers
@@ -73,6 +87,8 @@ pub fn rdmsr(vcpu: *Vcpu) error{Aborted}!void {
     const msr_kind: msr.All = @enumFromInt(guest_regs.rcx);
 
     const val: u64 = switch (msr_kind) {
+        .IA32_TSC_ADJUST => vcpu.shadow_msrs.tsc_adjust,
+        .IA32_MCG_CAP => msr.mc_bank_count, // count only, no MCG_CTL_P/extended features
         .EFER => vmread(.GUEST_IA32_EFER) | (vmread(.GUEST_IA32_EFER_HIGH) << 32),
         .FS_BASE => vmread(.GUEST_FS_BASE),
         .GS_BASE => vmread(.GUEST_GS_BASE),
@@ -93,7 +109,21 @@ pub fn rdmsr(vcpu: *Vcpu) error{Aborted}!void {
             };
             break :blk e.data;
         },
-        _ => return vcpu.abortMsg("Unhandled RDMSR for 0x{x}\n", .{@intFromEnum(msr_kind)}),
+        .IA32_UCODE_REV => blk: {
+            const msr_initial = if (vcpu.guest_msr.find(.IA32_UCODE_REV)) |m|
+                m.data
+            else
+                0;
+            msr.wrmsr(.IA32_UCODE_REV, msr_initial);
+            _ = debug.getFeatures();
+            // ^^ cpuid, eax=1
+            break :blk msr.rdmsr(.IA32_UCODE_REV);
+        },
+        .IA32_ARCH_CAPABILITIES => msr.rdmsr(.IA32_ARCH_CAPABILITIES),
+        _ => if (msr.isMcBankMsr(guest_regs.ecx().*))
+            0 // RAZ
+        else
+            return vcpu.abortMsg("Unhandled RDMSR for 0x{x}\n", .{@intFromEnum(msr_kind)}),
         else => return vcpu.abortMsg("Unhandled RDMSR for {s}\n", .{@tagName(msr_kind)}),
     };
 
@@ -120,9 +150,16 @@ pub fn wrmsr(vcpu: *Vcpu) error{Aborted}!void {
             vmwrite(.GUEST_IA32_EFER, val & 0xffff_ffff);
             vmwrite(.GUEST_IA32_EFER_HIGH, val >> 32);
         },
+        .IA32_TSC_ADJUST => vcpu.shadow_msrs.tsc_adjust = val, // shadow only, TSC_OFFSET is not touched
         .GS_BASE => vmwrite(.GUEST_GS_BASE, val),
         .FS_BASE => vmwrite(.GUEST_FS_BASE, val),
-        _ => return vcpu.abortMsg("Unhandled WRMSR for 0x{x}\n", .{@intFromEnum(msr_kind)}),
+        .IA32_UCODE_REV => {
+            if (val != 0)
+                return;
+            vcpu.guest_msr.set(.IA32_UCODE_REV, val);
+        },
+        _ => if (!msr.isMcBankMsr(guest_regs.ecx().*)) // else WI
+            return vcpu.abortMsg("Unhandled WRMSR for 0x{x}\n", .{@intFromEnum(msr_kind)}),
         else => return vcpu.abortMsg("Unhandled WRMSR for {s}\n", .{@tagName(msr_kind)}),
     }
 }

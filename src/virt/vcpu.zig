@@ -26,6 +26,10 @@ pub const Vcpu = struct {
 
     host_msr: msr.MsrArea,
     guest_msr: msr.MsrArea,
+    /// software-only MSR values. not in `guest_msr`, that area is loaded into the real MSRs on entry.
+    shadow_msrs: struct {
+        tsc_adjust: u64 = 0,
+    },
 
     /// the guest's general purpose registers.
     /// while handling a VM-exit this points at the frame `vmExitHandler` pushed.
@@ -83,6 +87,7 @@ pub const Vcpu = struct {
         self.index = index;
         self.old_rsp = 0;
         self.old_rbp = 0;
+        self.shadow_msrs = .{};
 
         self.vmm_stack = try mem_allocator.kalloc.allocPages(1);
         @memset(self.vmm_stack, 0);
