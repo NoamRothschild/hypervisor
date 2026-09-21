@@ -100,19 +100,19 @@ pub const Cr4 = packed struct(u64) {
     rsvd4: u39 = 0,
 };
 
-fn crPassthroughRead(vcpu: *Vcpu, exit_qual: vmx.ExitQualification.Cr) void {
+fn crPassthroughRead(vcpu: *Vcpu, exit_qual: vmx.ExitQualification.Cr) error{Aborted}!void {
     // read access to CR0 and CR4 does not cause a VM Exit
     // since all bits in the masks are set, reads from CR0 and CR4
     //  always return the values stored in the read shadows
     const val = switch (exit_qual.index) {
         3 => vmread(.GUEST_CR3),
-        else => @panic("unhandled path"),
+        else => return vcpu.abortMsg("unhandled read from CR{d}\n", .{exit_qual.index}),
     };
 
     exit_qual.setVal(vcpu, val);
 }
 
-fn crPassthroughWrite(vcpu: *Vcpu, exit_qual: vmx.ExitQualification.Cr) void {
+fn crPassthroughWrite(vcpu: *Vcpu, exit_qual: vmx.ExitQualification.Cr) error{Aborted}!void {
     var cr_val = exit_qual.getVal(vcpu);
     std.log.info("new CR{d} value: 0x{x}\n", .{ exit_qual.index, cr_val });
     switch (exit_qual.index) {
@@ -136,7 +136,7 @@ fn crPassthroughWrite(vcpu: *Vcpu, exit_qual: vmx.ExitQualification.Cr) void {
             vmwrite(.GUEST_CR4, cr_val);
             updateIa32e();
         },
-        else => std.debug.panic("unhandled write to CR{d}\n", .{exit_qual.index}),
+        else => return vcpu.abortMsg("unhandled write to CR{d}\n", .{exit_qual.index}),
     }
 }
 
@@ -161,15 +161,15 @@ fn updateIa32e() void {
     vmx.vmwrite(.GUEST_IA32_EFER, efer_int);
 }
 
-pub fn crAccess(vcpu: *Vcpu, exit_qual: vmx.ExitQualification.Cr) void {
+pub fn crAccess(vcpu: *Vcpu, exit_qual: vmx.ExitQualification.Cr) error{Aborted}!void {
     std.log.info("guest tried to perform {s} on CR{d} from reg {s}\n", .{
         @tagName(exit_qual.access_type),
         exit_qual.index,
         @tagName(exit_qual.reg),
     });
     switch (exit_qual.access_type) {
-        .mov_to => crPassthroughWrite(vcpu, exit_qual),
-        .mov_from => crPassthroughRead(vcpu, exit_qual),
-        else => std.debug.panic("Unimplemented CR access request for {s}\n", .{@tagName(exit_qual.access_type)}),
+        .mov_to => try crPassthroughWrite(vcpu, exit_qual),
+        .mov_from => try crPassthroughRead(vcpu, exit_qual),
+        else => return vcpu.abortMsg("Unimplemented CR access request for {s}\n", .{@tagName(exit_qual.access_type)}),
     }
 }

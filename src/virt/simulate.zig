@@ -65,7 +65,7 @@ pub fn iret16(guest_state: *vmx.VMState) !void {
     vmwrite(.GUEST_RFLAGS, flags);
 }
 
-pub fn rdmsr(vcpu: *Vcpu) void {
+pub fn rdmsr(vcpu: *Vcpu) error{Aborted}!void {
     const guest_regs = vcpu.regs;
     const msr_kind: msr.All = @enumFromInt(guest_regs.rcx);
 
@@ -90,15 +90,15 @@ pub fn rdmsr(vcpu: *Vcpu) void {
             };
             break :blk e.data;
         },
-        _ => std.debug.panic("Unhandled RDMSR for 0x{x}\n", .{@intFromEnum(msr_kind)}),
-        else => std.debug.panic("Unhandled RDMSR for {s}\n", .{@tagName(msr_kind)}),
+        _ => return vcpu.abortMsg("Unhandled RDMSR for 0x{x}\n", .{@intFromEnum(msr_kind)}),
+        else => return vcpu.abortMsg("Unhandled RDMSR for {s}\n", .{@tagName(msr_kind)}),
     };
 
     guest_regs.edx().* = @truncate(val >> 32);
     guest_regs.eax().* = @truncate(val);
 }
 
-pub fn wrmsr(vcpu: *Vcpu) void {
+pub fn wrmsr(vcpu: *Vcpu) error{Aborted}!void {
     const guest_regs = vcpu.regs;
     const val = (@as(u64, guest_regs.edx().*) << 32) | @as(u64, guest_regs.eax().*);
     const msr_kind: msr.All = @enumFromInt(guest_regs.rcx);
@@ -119,8 +119,8 @@ pub fn wrmsr(vcpu: *Vcpu) void {
         },
         .GS_BASE => vmwrite(.GUEST_GS_BASE, val),
         .FS_BASE => vmwrite(.GUEST_FS_BASE, val),
-        _ => std.debug.panic("Unhandled WRMSR for 0x{x}\n", .{@intFromEnum(msr_kind)}),
-        else => std.debug.panic("Unhandled WRMSR for {s}\n", .{@tagName(msr_kind)}),
+        _ => return vcpu.abortMsg("Unhandled WRMSR for 0x{x}\n", .{@intFromEnum(msr_kind)}),
+        else => return vcpu.abortMsg("Unhandled WRMSR for {s}\n", .{@tagName(msr_kind)}),
     }
 }
 

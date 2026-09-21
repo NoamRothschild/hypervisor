@@ -261,6 +261,88 @@ pub const Vcpu = struct {
         vmwrite(.VM_ENTRY_MSR_LOAD_COUNT, self.guest_msr.registered_entries);
     }
 
+    /// The guest did something that can't be continued from: it faulted, or it tried
+    /// something the hypervisor doesn't support (yet). Not for hypervisor bugs, those panic.
+    /// Handlers propagate this up to `mainVmExitHandler`, which stops the vcpu.
+    pub fn abort(_: *Vcpu) error{Aborted}!void {
+        return error.Aborted;
+    }
+
+    /// same as `abort`, printing why first.
+    pub fn abortMsg(_: *Vcpu, comptime fmt: []const u8, args: anytype) error{Aborted}!void {
+        std.log.err(fmt, args);
+        return error.Aborted;
+    }
+
+    /// decides what to do about a VM-exit, see `ExitAction`.
+    /// fails with `error.Aborted` when the vcpu can't continue, see `abort`.
+    fn tryExitReason(self: *Vcpu, exit_reason: vmx.ExitReason, exit_qual: vmx.ExitQualification) error{Aborted}!ExitAction {
+        switch (exit_reason) {
+            .vmclear,
+            .vmptrld,
+            .vmptrst,
+            .vmread,
+            .vmresume,
+            .vmwrite,
+            .vmxoff,
+            .vmxon,
+            .vmlaunch,
+            => {},
+
+            .msr_read => {
+                try simulate.rdmsr(self);
+                return .@"resume";
+            },
+            .msr_write => {
+                try simulate.wrmsr(self);
+                return .@"resume";
+            },
+
+            .cr_access => {
+                try simulate.crAccess(self, exit_qual.cr);
+                return .@"resume";
+            },
+
+            .exception_nmi => {
+                const intr_info = vmread(.VM_EXIT_INTR_INFO);
+                const vector = intr_info & 0xff;
+                const err_valid = (intr_info >> 11) & 1;
+                std.log.err(
+                    "guest exception: vector {d} (info 0x{x}) err 0x{x}{s} at rip 0x{x}, linear 0x{x}, cr2-ish qual 0x{x}\n",
+                    .{
+                        vector,
+                        intr_info,
+                        vmread(.VM_EXIT_INTR_ERROR_CODE),
+                        if (err_valid == 0) " (no err code)" else "",
+                        vmread(.GUEST_RIP),
+                        vmread(.GUEST_LINEAR_ADDRESS),
+                        exit_qual.backing_int,
+                    },
+                );
+                return .exit;
+            },
+
+            .cpuid => simulate.cpuid(self),
+            .hlt => {
+                std.log.info("user executed hlt\n", .{});
+                return .exit;
+            },
+            .triple_fault => {
+                std.log.err("guest triple faulted at rip 0x{x}; not resuming\n", .{vmread(.GUEST_RIP)});
+                return .exit;
+            },
+            .invalid_guest_state => {
+                std.log.err("invalid guest state; not resuming\n", .{});
+                return .exit;
+            },
+            else => {
+                std.log.err("unhandled exit reason: {}; not resuming\n", .{exit_reason});
+                return .exit;
+            },
+        }
+        return .@"resume";
+    }
+
     /// calls vmlaunch.
     /// ret val indicates success of operation
     ///
@@ -436,70 +518,12 @@ export fn mainVmExitHandler(vcpu: *Vcpu, guest_regs: *Vcpu.Regs) callconv(.c) Ex
         vmread(.GUEST_RIP),
     });
 
-    switch (exit_reason) {
-        .vmclear,
-        .vmptrld,
-        .vmptrst,
-        .vmread,
-        .vmresume,
-        .vmwrite,
-        .vmxoff,
-        .vmxon,
-        .vmlaunch,
-        => {},
-
-        .msr_read => {
-            simulate.rdmsr(vcpu);
-            return .@"resume";
-        },
-        .msr_write => {
-            simulate.wrmsr(vcpu);
-            return .@"resume";
-        },
-
-        .cr_access => {
-            simulate.crAccess(vcpu, exit_qual.cr);
-            return .@"resume";
-        },
-
-        .exception_nmi => {
-            const intr_info = vmread(.VM_EXIT_INTR_INFO);
-            const vector = intr_info & 0xff;
-            const err_valid = (intr_info >> 11) & 1;
-            std.log.err(
-                "guest exception: vector {d} (info 0x{x}) err 0x{x}{s} at rip 0x{x}, linear 0x{x}, cr2-ish qual 0x{x}\n",
-                .{
-                    vector,
-                    intr_info,
-                    vmread(.VM_EXIT_INTR_ERROR_CODE),
-                    if (err_valid == 0) " (no err code)" else "",
-                    vmread(.GUEST_RIP),
-                    vmread(.GUEST_LINEAR_ADDRESS),
-                    exit_qual.backing_int,
-                },
-            );
+    return vcpu.tryExitReason(exit_reason, exit_qual) catch |err| switch (err) {
+        error.Aborted => {
+            std.log.err("vcpu {d} aborted at rip 0x{x}; not resuming\n", .{ vcpu.index, vmread(.GUEST_RIP) });
             return .exit;
         },
-
-        .cpuid => simulate.cpuid(vcpu),
-        .hlt => {
-            std.log.info("user executed hlt\n", .{});
-            return .exit;
-        },
-        .triple_fault => {
-            std.log.err("guest triple faulted at rip 0x{x}; not resuming\n", .{vmread(.GUEST_RIP)});
-            return .exit;
-        },
-        .invalid_guest_state => {
-            std.log.err("invalid guest state; not resuming\n", .{});
-            return .exit;
-        },
-        else => {
-            std.log.err("unhandled exit reason: {}; not resuming\n", .{exit_reason});
-            return .exit;
-        },
-    }
-    return .@"resume";
+    };
 }
 
 export fn resumeToNextInstruction() callconv(.c) void {
