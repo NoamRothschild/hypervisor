@@ -1,3 +1,4 @@
+const PhysAddr = @import("../../mem/address.zig").HostPhys;
 // This allows a processor to map 48-bit virtual addresses to 52-bit physical addresses.
 
 pub const PML4E = packed struct(u64) {
@@ -17,14 +18,14 @@ pub const PML4E = packed struct(u64) {
     avl3: u11 = 0,
     xd: u1,
 
-    pub fn kernel_page(phys_addr: u64) linksection(".text.boot") @This() {
+    pub fn kernel_page(phys_addr: PhysAddr) linksection(".text.boot") @This() {
         return PML4E{
             .p = 1,
             .r_w = 1,
             .u_s = 0,
             .pwt = 0,
             .pcd = 0,
-            .phys_addr = @truncate(phys_addr >> 12),
+            .phys_addr = @truncate(phys_addr.raw() >> 12),
             .xd = 0,
         };
     }
@@ -124,10 +125,10 @@ pub const PDPTE = packed union(u64) {
         }
     },
 
-    pub fn kernel_page(comptime tag: enum { PD, @"1 GB" }, phys_addr: u64) linksection(".text.boot") @This() {
+    pub fn kernel_page(comptime tag: enum { PD, @"1 GB" }, phys_addr: PhysAddr) linksection(".text.boot") @This() {
         return switch (tag) {
-            .PD => .{ .PD = .kernel_page(@truncate(phys_addr >> 12)) },
-            .@"1 GB" => .{ .@"1 GB" = .kernel_page(@truncate(phys_addr >> 30)) },
+            .PD => .{ .PD = .kernel_page(@truncate(phys_addr.raw() >> 12)) },
+            .@"1 GB" => .{ .@"1 GB" = .kernel_page(@truncate(phys_addr.raw() >> 30)) },
         };
     }
 
@@ -229,10 +230,10 @@ pub const PDE = packed union(u64) {
         }
     },
 
-    pub fn kernel_page(comptime tag: enum { PT, @"2 MB" }, phys_addr: u64) linksection(".text.boot") @This() {
+    pub fn kernel_page(comptime tag: enum { PT, @"2 MB" }, phys_addr: PhysAddr) linksection(".text.boot") @This() {
         return switch (tag) {
-            .PT => .{ .PT = .kernel_page(@truncate(phys_addr >> 12)) },
-            .@"2 MB" => .{ .@"2 MB" = .kernel_page(@truncate(phys_addr >> 21)) },
+            .PT => .{ .PT = .kernel_page(@truncate(phys_addr.raw() >> 12)) },
+            .@"2 MB" => .{ .@"2 MB" = .kernel_page(@truncate(phys_addr.raw() >> 21)) },
         };
     }
 
@@ -277,7 +278,7 @@ pub const PTE = packed struct(u64) {
     pk: u4,
     xd: u1,
 
-    pub fn kernel_page(phys_addr: u64) linksection(".text.boot") @This() {
+    pub fn kernel_page(phys_addr: PhysAddr) linksection(".text.boot") @This() {
         return PTE{
             .p = 1,
             .r_w = 1,
@@ -286,7 +287,7 @@ pub const PTE = packed struct(u64) {
             .pcd = 0,
             .pat = 0,
             .g = 0,
-            .phys_addr = @truncate(phys_addr >> 12),
+            .phys_addr = @truncate(phys_addr.raw() >> 12),
             .pk = 0,
             .xd = 0,
         };
@@ -366,9 +367,9 @@ pub fn init() linksection(".text.boot") callconv(.c) void {
     // last pdei value
     last_allocated_kernel_directory_page = kernel_size_2MIB_pages - 1 + kernel_physical_start_pde_idx;
 
-    kernelPDPT[kernel_pdpt_idx] = PDPTE.kernel_page(.PD, @intFromPtr(&kernelPD));
+    kernelPDPT[kernel_pdpt_idx] = PDPTE.kernel_page(.PD, .from(@intFromPtr(&kernelPD)));
     // only update PML4 once everything is set up
-    PML4T[kernel_pml4_idx] = PML4E.kernel_page(@intFromPtr(&kernelPDPT));
+    PML4T[kernel_pml4_idx] = PML4E.kernel_page(.from(@intFromPtr(&kernelPDPT)));
 
     refreshCr3();
 }
@@ -381,10 +382,10 @@ pub inline fn refreshCr3() linksection(".text.boot") void {
 }
 
 /// reverse the effect of |'ing with the higher half base
-pub fn physAddrOfKernelVar(ptr: *anyopaque) u64 {
-    return @intFromPtr(ptr) & ~@as(u64, higher_half_base);
+pub fn physAddrOfKernelVar(ptr: *anyopaque) PhysAddr {
+    return .from(@intFromPtr(ptr) & ~@as(u64, higher_half_base));
 }
 
-pub fn bumpBoundary() u64 {
-    return (last_allocated_kernel_directory_page + 1) << 21;
+pub fn bumpBoundary() PhysAddr {
+    return .from((last_allocated_kernel_directory_page + 1) << 21);
 }

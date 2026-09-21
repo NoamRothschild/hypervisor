@@ -12,7 +12,7 @@ comptime {
 pub const bootloader_magic = 0x36d76289;
 
 pub inline fn mbd() *align(4) anyopaque {
-    return @ptrFromInt(hhdm.virtOf(@as(u64, mbd_raw)));
+    return hhdm.virtOf(*align(4) anyopaque, .from(mbd_raw));
 }
 
 pub const TagType = enum(u32) {
@@ -98,7 +98,7 @@ pub const TagType = enum(u32) {
         /// the module's bytes. GRUB drops modules wherever it likes, which is
         /// regularly outside the window `paging_init` maps, so go through the HHDM.
         pub fn data(self: *const @This()) []const u8 {
-            const ptr: [*]const u8 = @ptrFromInt(hhdm.virtOf(@as(u64, self.mod_start)));
+            const ptr = hhdm.virtOf([*]const u8, .from(self.mod_start));
             return ptr[0..self.len()];
         }
     };

@@ -41,9 +41,12 @@ pub fn cpuid(vcpu: *Vcpu) void {
 }
 
 /// pops `@sizeOf(T)` bytes from the stack into return value.
-pub fn pop(comptime T: type, guest_state: *vmx.VMState, cr3_if_virt: ?u64) !T {
+pub fn pop(comptime T: type, guest_state: *vmx.VMState, cr3_if_virt: ?ept.GuestPhys) !T {
     const rsp = vmread(.GUEST_RSP);
-    const value = try ept.readGuest(T, guest_state, rsp, cr3_if_virt);
+    const value = if (cr3_if_virt) |cr3|
+        try ept.readGuestVirt(T, guest_state, cr3, .from(rsp))
+    else
+        try ept.readGuestPhys(T, guest_state, .from(rsp));
     vmwrite(.GUEST_RSP, rsp +% 8);
     return value;
 }

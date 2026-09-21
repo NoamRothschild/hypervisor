@@ -2,9 +2,7 @@ const std = @import("std");
 const hhdm = @import("hhdm.zig");
 const mbt2 = @import("../arch/x86_64/multiboot2.zig");
 const paging = @import("../arch/x86_64/paging.zig");
-
-pub const PhysAddr = u64;
-pub const VirtAddr = u64;
+const PhysAddr = @import("address.zig").HostPhys;
 
 const FreeListAllocator = @import("fla.zig");
 const BitmapAllocator = @import("bitmap_allocator.zig").BitmapAllocator;
@@ -38,9 +36,9 @@ pub const KAlloc = struct {
     /// Clamps `[start, start + len)` to the arena and appends it, dropping
     /// anything empty. Overflowing the array would silently hand reserved
     /// memory to the allocator, so it is fatal.
-    fn addRange(list: *[max_reserved_ranges]Range, count: *usize, start: u64, len: u64, limit: u64) void {
-        const s = @min(start, limit);
-        const e = @min(start +| len, limit);
+    fn addRange(list: *[max_reserved_ranges]Range, count: *usize, start: PhysAddr, len: u64, limit: u64) void {
+        const s = @min(start.raw(), limit);
+        const e = @min(start.raw() +| len, limit);
         if (e <= s) return;
 
         if (count.* == list.len)
@@ -53,7 +51,7 @@ pub const KAlloc = struct {
     /// Initializes `self` in place -- the page pool keeps a pointer to
     /// `self.fla`, so a `KAlloc` must not be moved once initialized.
     pub fn init(self: *KAlloc) void {
-        const buf: *[1 << 30]u8 = @ptrFromInt(0x0 | hhdm.virt_base);
+        const buf = hhdm.virtOf(*[1 << 30]u8, .from(0));
         self.* = .{
             .fla = .init(@alignCast(buf), .first_fit),
             .pages = undefined,
@@ -69,7 +67,7 @@ pub const KAlloc = struct {
 
         // everything `paging`'s boot-time bump allocator has already handed
         // out, kernel image included
-        addRange(&ranges, &range_count, 0, paging.bumpBoundary(), buf.len);
+        addRange(&ranges, &range_count, .from(0), paging.bumpBoundary().raw(), buf.len);
 
         // the multiboot info struct sits wherever GRUB dropped it, which is
         // regularly inside this region and past bumpBoundary().
@@ -83,7 +81,7 @@ pub const KAlloc = struct {
                 break;
 
             if (entry.type != .mem_available)
-                addRange(&ranges, &range_count, entry.addr, entry.len, buf.len);
+                addRange(&ranges, &range_count, .from(entry.addr), entry.len, buf.len);
         }
 
         var tags: mbt2.TagIterator = .init();
@@ -91,7 +89,7 @@ pub const KAlloc = struct {
             if (tag.type != .module) continue;
 
             const mod: *const mbt2.TagType.Module = @ptrCast(@alignCast(tag));
-            addRange(&ranges, &range_count, mod.mod_start, mod.len(), buf.len);
+            addRange(&ranges, &range_count, .from(mod.mod_start), mod.len(), buf.len);
         }
 
         std.mem.sort(Range, ranges[0..range_count], {}, Range.lessThan);
@@ -147,7 +145,7 @@ pub const KAlloc = struct {
     /// Allocates `count` contiguous 4KB pages from the page pool.
     pub fn allocPages(self: *KAlloc, count: usize) Allocator.Error![]align(page_size) u8 {
         const addr = try self.pages.alloc(count);
-        const ptr: [*]align(page_size) u8 = @ptrFromInt(hhdm.virtOf(addr));
+        const ptr = hhdm.virtOf([*]align(page_size) u8, addr);
         return ptr[0 .. count * page_size];
     }
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const KAlloc = @import("../mem/allocator.zig").KAlloc;
+const HostPhys = @import("../mem/address.zig").HostPhys;
 
 pub inline fn rdmsr(msr_id: All) u64 {
     var low: u32 = undefined;
@@ -134,7 +135,7 @@ pub const MsrArea = struct {
         return null;
     }
 
-    pub fn phys(self: *MsrArea) u64 {
+    pub fn phys(self: *MsrArea) HostPhys {
         return @import("../mem/hhdm.zig").physOf(self.entries.ptr);
     }
 };

@@ -5,6 +5,7 @@ const debug = @import("../debug.zig");
 const msr = @import("msr.zig");
 const vmx = @import("vmx.zig");
 const vmcs = @import("vmcs.zig");
+const ept = @import("ept.zig");
 const simulate = @import("simulate.zig");
 const rdmsr = msr.rdmsr;
 const vmread = vmx.vmread;
@@ -17,10 +18,8 @@ pub const Vcpu = struct {
     vm: *vmx.VMState,
     /// position in `vm.cpus`
     index: usize,
-    /// phys addr
-    vmxon_region: u64,
-    /// phys addr
-    vmcs_region: u64,
+    vmxon_region: ept.HostPhys,
+    vmcs_region: ept.HostPhys,
     /// virt addr, stack for vmm in VM-Exit state. The top `stack_reserved` bytes
     /// hold the `*Vcpu` that `vmExitHandler` reads to find its vcpu.
     vmm_stack: []align(4096) u8,
@@ -106,7 +105,7 @@ pub const Vcpu = struct {
         const vmxon_region_phys = hhdm.physOf(vmxon_page);
 
         std.log.info("virtual buff addr for VMXON at 0x{x}\n", .{@intFromPtr(vmxon_page)});
-        std.log.info("physical buff addr for VMXON at 0x{x}\n", .{vmxon_region_phys});
+        std.log.info("physical buff addr for VMXON at 0x{x}\n", .{vmxon_region_phys.raw()});
 
         @memset(vmxon_page, 0);
         @as(*volatile u32, @ptrCast(vmxon_page)).* = revisionIdentifier();
@@ -119,7 +118,7 @@ pub const Vcpu = struct {
         const vmcs_region_phys = hhdm.physOf(vmcs_page);
 
         std.log.info("virtual buff addr for VMCS at 0x{x}\n", .{@intFromPtr(vmcs_page)});
-        std.log.info("physical buff addr for VMCS at 0x{x}\n", .{vmcs_region_phys});
+        std.log.info("physical buff addr for VMCS at 0x{x}\n", .{vmcs_region_phys.raw()});
 
         @memset(vmcs_page, 0);
         @as(*volatile u32, @ptrCast(vmcs_page)).* = revisionIdentifier();
@@ -237,11 +236,11 @@ pub const Vcpu = struct {
         gm.set(.SYSCALL_MASK, 0);
         gm.set(.KERNEL_GS_BASE, 0);
 
-        const hm_low: u32 = @truncate(hm.phys());
-        const hm_high: u32 = @truncate(hm.phys() >> 32);
+        const hm_low: u32 = @truncate(hm.phys().raw());
+        const hm_high: u32 = @truncate(hm.phys().raw() >> 32);
 
-        const gm_low: u32 = @truncate(gm.phys());
-        const gm_high: u32 = @truncate(gm.phys() >> 32);
+        const gm_low: u32 = @truncate(gm.phys().raw());
+        const gm_high: u32 = @truncate(gm.phys().raw() >> 32);
 
         vmwrite(.VM_EXIT_MSR_LOAD_ADDR, hm_low);
         vmwrite(.VM_EXIT_MSR_STORE_ADDR, gm_low);

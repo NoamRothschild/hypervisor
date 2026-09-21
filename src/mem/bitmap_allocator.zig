@@ -3,7 +3,7 @@ const hhdm = @import("hhdm.zig");
 
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
-const PhysAddr = @import("allocator.zig").PhysAddr;
+const PhysAddr = @import("address.zig").HostPhys;
 
 /// Hands out contiguous runs of `size`-byte blocks from the physical region
 /// `[base, base + capacity * size)`. Bookkeeping is one bit per block,
@@ -24,7 +24,7 @@ pub fn BitmapAllocator(comptime size: usize) type {
 
         /// Manages every whole block of `[base, base + len)`; `base` must be block aligned.
         pub fn init(backing: Allocator, base: PhysAddr, len: usize, initial: State) Allocator.Error!Self {
-            std.debug.assert(base % block_size == 0);
+            std.debug.assert(base.raw() % block_size == 0);
             const avail: std.DynamicBitSetUnmanaged = switch (initial) {
                 .free => try .initFull(backing, len / block_size),
                 .used => try .initEmpty(backing, len / block_size),
@@ -66,7 +66,7 @@ pub fn BitmapAllocator(comptime size: usize) type {
         }
 
         pub fn free(self: *Self, addr: PhysAddr, count: usize) void {
-            std.debug.assert(addr % block_size == 0);
+            std.debug.assert(addr.raw() % block_size == 0);
             const first = self.indexOf(addr);
             for (first..first + count) |i| std.debug.assert(!self.avail.isSet(i)); // double free
             self.avail.setRangeValue(.{ .start = first, .end = first + count }, true);
@@ -91,28 +91,28 @@ pub fn BitmapAllocator(comptime size: usize) type {
         }
 
         fn addrOf(self: *const Self, index: usize) PhysAddr {
-            return self.base + index * block_size;
+            return self.base.offset(index * block_size);
         }
 
         fn indexOf(self: *const Self, addr: PhysAddr) usize {
-            return (addr - self.base) / block_size;
+            return (addr.raw() - self.base.raw()) / block_size;
         }
 
         /// first block index >= `index` whose address is `alignment` aligned
         fn alignedIndex(self: *const Self, index: usize, alignment: Alignment) usize {
-            return self.indexOf(alignment.forward(self.addrOf(index)));
+            return self.indexOf(.from(alignment.forward(self.addrOf(index).raw())));
         }
 
         /// `.free` rounds the region inwards, `.used` rounds it outwards
         fn markRegion(self: *Self, addr: PhysAddr, len: usize, state: State) void {
-            const lo = std.math.clamp(addr, self.base, self.end());
-            const hi = std.math.clamp(addr +| len, self.base, self.end());
+            const lo = std.math.clamp(addr.raw(), self.base.raw(), self.end().raw());
+            const hi = std.math.clamp(addr.raw() +| len, self.base.raw(), self.end().raw());
             const start, const stop = switch (state) {
-                .free => .{ std.mem.alignForward(PhysAddr, lo, block_size), std.mem.alignBackward(PhysAddr, hi, block_size) },
-                .used => .{ std.mem.alignBackward(PhysAddr, lo, block_size), std.mem.alignForward(PhysAddr, hi, block_size) },
+                .free => .{ std.mem.alignForward(u64, lo, block_size), std.mem.alignBackward(u64, hi, block_size) },
+                .used => .{ std.mem.alignBackward(u64, lo, block_size), std.mem.alignForward(u64, hi, block_size) },
             };
             if (start < stop)
-                self.avail.setRangeValue(.{ .start = self.indexOf(start), .end = self.indexOf(stop) }, state == .free);
+                self.avail.setRangeValue(.{ .start = self.indexOf(.from(start)), .end = self.indexOf(.from(stop)) }, state == .free);
         }
 
         fn blocksFor(len: usize) usize {
@@ -122,7 +122,7 @@ pub fn BitmapAllocator(comptime size: usize) type {
         fn vAlloc(ctx: *anyopaque, len: usize, alignment: Alignment, _: usize) ?[*]u8 {
             const self: *Self = @ptrCast(@alignCast(ctx));
             const addr = self.allocAligned(blocksFor(len), alignment) catch return null;
-            return @ptrFromInt(hhdm.virtOf(addr));
+            return hhdm.virtOf([*]u8, addr);
         }
 
         /// in place only while the block count stays the same
@@ -144,36 +144,36 @@ pub fn BitmapAllocator(comptime size: usize) type {
 const Page4K = BitmapAllocator(0x1000);
 
 test "alloc hands out contiguous runs and free reclaims them" {
-    var ba: Page4K = try .init(std.testing.allocator, 0x10000, 4 * 0x1000, .free);
+    var ba: Page4K = try .init(std.testing.allocator, .from(0x10000), 4 * 0x1000, .free);
     defer ba.deinit();
 
-    try std.testing.expectEqual(0x10000, try ba.alloc(1));
-    try std.testing.expectEqual(0x11000, try ba.alloc(3));
+    try std.testing.expectEqual(PhysAddr.from(0x10000), try ba.alloc(1));
+    try std.testing.expectEqual(PhysAddr.from(0x11000), try ba.alloc(3));
     try std.testing.expectError(error.OutOfMemory, ba.alloc(1));
 
-    ba.free(0x11000, 3);
-    try std.testing.expectEqual(0x11000, try ba.alloc(2));
+    ba.free(.from(0x11000), 3);
+    try std.testing.expectEqual(PhysAddr.from(0x11000), try ba.alloc(2));
     try std.testing.expectEqual(1, ba.availBlocks());
 }
 
 test "allocAligned skips misaligned candidate runs" {
-    var ba: Page4K = try .init(std.testing.allocator, 0x1000, 0x10000, .free);
+    var ba: Page4K = try .init(std.testing.allocator, .from(0x1000), 0x10000, .free);
     defer ba.deinit();
 
-    try std.testing.expectEqual(0x4000, try ba.allocAligned(2, .fromByteUnits(0x4000)));
-    try std.testing.expectEqual(0x8000, try ba.allocAligned(2, .fromByteUnits(0x4000)));
+    try std.testing.expectEqual(PhysAddr.from(0x4000), try ba.allocAligned(2, .fromByteUnits(0x4000)));
+    try std.testing.expectEqual(PhysAddr.from(0x8000), try ba.allocAligned(2, .fromByteUnits(0x4000)));
 }
 
 test "markFree rounds inwards, markUsed rounds outwards" {
-    var ba: Page4K = try .init(std.testing.allocator, 0, 8 * 0x1000, .used);
+    var ba: Page4K = try .init(std.testing.allocator, .from(0), 8 * 0x1000, .used);
     defer ba.deinit();
 
-    ba.markFree(0x800, 0x3000); // only [0x1000, 0x3000) is whole
+    ba.markFree(.from(0x800), 0x3000); // only [0x1000, 0x3000) is whole
     try std.testing.expectEqual(2, ba.availBlocks());
 
-    ba.markUsed(0x2fff, 1); // touches [0x2000, 0x3000)
+    ba.markUsed(.from(0x2fff), 1); // touches [0x2000, 0x3000)
     try std.testing.expectEqual(1, ba.availBlocks());
 
-    ba.markFree(0x7000, 0x100000); // clamped to the managed region
+    ba.markFree(.from(0x7000), 0x100000); // clamped to the managed region
     try std.testing.expectEqual(2, ba.availBlocks());
 }

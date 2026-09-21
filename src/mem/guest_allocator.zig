@@ -3,7 +3,7 @@ const std = @import("std");
 const mbt2 = @import("../arch/x86_64/multiboot2.zig");
 
 const Allocator = std.mem.Allocator;
-const PhysAddr = @import("allocator.zig").PhysAddr;
+const PhysAddr = @import("address.zig").HostPhys;
 const BitmapAllocator = @import("bitmap_allocator.zig").BitmapAllocator;
 
 pub const GuestAllocator = @This();
@@ -24,10 +24,10 @@ pub fn init(backing: Allocator) Allocator.Error!GuestAllocator {
     while (it.next()) |e| ram_end = @max(ram_end, e.addr + e.len);
     it.reset();
 
-    var bitmap: Bitmap = try .init(backing, 0, @min(ram_end, max_len), .used);
-    while (it.next()) |e| if (e.type == .mem_available) bitmap.markFree(e.addr, e.len);
+    var bitmap: Bitmap = try .init(backing, .from(0), @min(ram_end, max_len), .used);
+    while (it.next()) |e| if (e.type == .mem_available) bitmap.markFree(.from(e.addr), e.len);
     // the first GB is the kernel allocator's heap (see allocator.zig)
-    bitmap.markUsed(0, block_size);
+    bitmap.markUsed(.from(0), block_size);
 
     // blocks holding a bootloader module are not ours to hand to a guest
     var tags: mbt2.TagIterator = .init();
@@ -35,7 +35,7 @@ pub fn init(backing: Allocator) Allocator.Error!GuestAllocator {
         if (tag.type != .module) continue;
 
         const mod: *const mbt2.TagType.Module = @ptrCast(@alignCast(tag));
-        bitmap.markUsed(mod.mod_start, mod.len());
+        bitmap.markUsed(.from(mod.mod_start), mod.len());
     }
 
     return .{ .bitmap = bitmap };

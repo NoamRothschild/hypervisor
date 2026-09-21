@@ -135,7 +135,7 @@ pub fn setup(vcpu: *Vcpu, kalloc: *KAlloc, eptp: ept.EPTP) !void {
     // bit 1 is reserved and must be 1; IF=0, the guest enables interrupts itself
     vmwrite(.GUEST_RFLAGS, 0x2);
 
-    vmwrite(.MSR_BITMAP, vcpu.vm.msr_bitmap_phys);
+    vmwrite(.MSR_BITMAP, vcpu.vm.msr_bitmap_phys.raw());
     try vcpu.setupMsrs(kalloc);
 
     vmwrite(.GUEST_SYSENTER_CS, rdmsr(.IA32_SYSENTER_CS));

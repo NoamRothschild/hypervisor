@@ -57,13 +57,13 @@ pub fn enableOperation() void {
 
 pub const VMState = struct {
     /// guest-physical addr of the guest's own PML4
-    guest_cr3: u64,
+    guest_cr3: ept.GuestPhys,
     /// total guest RAM, identity-mapped from guest-physical 0
     guest_ram_block_count: u64,
     /// msr bitmap virt addr, shared by the VMCS of every vcpu
     msr_bitmap: *[4096]u8,
     /// msr bitmap phys addr
-    msr_bitmap_phys: u64,
+    msr_bitmap_phys: ept.HostPhys,
     guest_pml4: *align(4096) [512]ept.EPT_PML4E,
     /// `.len` is always greater than 0
     guest_mem_pages: []*align(0x1000) [1 << 30]u8,

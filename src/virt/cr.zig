@@ -43,7 +43,7 @@ pub const Cr0 = packed struct(u64) {
 };
 
 /// contains the VA of the last page fault
-pub const Cr2 = u64;
+pub const Cr2 = ept.GuestVirt;
 
 pub const Cr4 = packed struct(u64) {
     /// virtual-8086 mode extensions
@@ -124,7 +124,7 @@ fn crPassthroughWrite(vcpu: *Vcpu, exit_qual: vmx.ExitQualification.Cr) error{Ab
         },
         3 => {
             // TODO: opt for INVVPID rather than INVEPT (extra uneccessary flushes)
-            ept.invept(.single_context, vmread(.EPT_POINTER));
+            ept.invept(.single_context, @bitCast(vmread(.EPT_POINTER)));
 
             // in VMX Operation, the guest’s CR3[63] must always be 0. (related to PCID)
             cr_val &= ~@as(u64, 1 << 63);

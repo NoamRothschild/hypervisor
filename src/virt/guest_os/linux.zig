@@ -65,20 +65,20 @@ pub fn load(dst_guest: *vmx.VMState) !void {
 
     const cmdline_max_size = if (bp.hdr.cmdline_size < 256) bp.hdr.cmdline_size else 256;
     const cmdline_val = "console=ttyS0 earlyprintk=serial nokaslr";
-    try ept.writeGuest(dst_guest, cmdline_val, layout.cmdline);
-    try ept.memsetGuest(dst_guest, 0, layout.cmdline + cmdline_val.len, cmdline_max_size - cmdline_val.len);
+    try ept.writeGuest(dst_guest, cmdline_val, .from(layout.cmdline));
+    try ept.memsetGuest(dst_guest, 0, .from(layout.cmdline + cmdline_val.len), cmdline_max_size - cmdline_val.len);
 
     const guest_gdt = gdt32.flatProtectedMode();
-    try ept.writeGuest(dst_guest, std.mem.asBytes(&guest_gdt), layout.gdt);
+    try ept.writeGuest(dst_guest, std.mem.asBytes(&guest_gdt), .from(layout.gdt));
     vmx.vmwrite(.GUEST_GDTR_BASE, layout.gdt);
     vmx.vmwrite(.GUEST_GDTR_LIMIT, @sizeOf(@TypeOf(guest_gdt)) - 1);
 
     const code_offset = bp.hdr.protectedCodeOffset();
     const code_size = img.len - code_offset;
-    try ept.writeGuest(dst_guest, std.mem.asBytes(&bp), layout.bootparam);
+    try ept.writeGuest(dst_guest, std.mem.asBytes(&bp), .from(layout.bootparam));
     try ept.writeGuest(
         dst_guest,
         img[code_offset .. code_offset + code_size],
-        layout.kernel_base,
+        .from(layout.kernel_base),
     );
 }
