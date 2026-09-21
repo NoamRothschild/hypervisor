@@ -47,6 +47,13 @@ pub fn rdmsr(vcpu: *Vcpu) error{Aborted}!void {
         .IA32_TSC_ADJUST => vcpu.shadow_msrs.tsc_adjust,
         .IA32_FEATURE_CONTROL => vcpu.shadow_msrs.feature_control,
         .MISC_FEATURES_ENABLES => 0, // RAZ, cpuid faulting is not emulated
+        .MSR_PLATFORM_ENERGY_COUNTER => 0, // RAZ, no RAPL
+        .MSR_PP1_ENERGY_STATUS => 0, // RAZ, no RAPL
+        .MSR_DRAM_ENERGY_STATUS => 0, // RAZ, no RAPL
+        .MSR_PKG_ENERGY_STATUS => 0, // RAZ, no RAPL
+        .MSR_PP0_ENERGY_STATUS => 0, // RAZ, no RAPL
+        .MSR_RAPL_POWER_UNIT => 0, // RAZ, no RAPL
+        .MSR_PLATFORM_INFO => 0, // RAZ, no cpuid faulting or turbo ratios
         .IA32_MCG_CAP => msr.mc_bank_count, // count only, no MCG_CTL_P/extended features
         .EFER => vmread(.GUEST_IA32_EFER) | (vmread(.GUEST_IA32_EFER_HIGH) << 32),
         .FS_BASE => vmread(.GUEST_FS_BASE),
@@ -112,6 +119,7 @@ pub fn wrmsr(vcpu: *Vcpu) error{Aborted}!void {
         },
         .IA32_TSC_ADJUST => vcpu.shadow_msrs.tsc_adjust = val, // shadow only, TSC_OFFSET is not touched
         .IA32_FEATURE_CONTROL => {}, // locked, so WI (real hardware would #GP)
+        .MISC_FEATURES_ENABLES => {}, // WI, Linux clears it unconditionally
         .GS_BASE => vmwrite(.GUEST_GS_BASE, val),
         .FS_BASE => vmwrite(.GUEST_FS_BASE, val),
         .IA32_UCODE_REV => {
