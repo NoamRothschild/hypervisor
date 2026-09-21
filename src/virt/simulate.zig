@@ -7,9 +7,10 @@ const msr = @import("msr.zig");
 const vmx = @import("vmx.zig");
 const vmread = vmx.vmread;
 const vmwrite = vmx.vmwrite;
-const CpuState = vmx.CpuState;
+const Vcpu = @import("vcpu.zig").Vcpu;
 
-pub fn cpuid(guest_regs: *CpuState) void {
+pub fn cpuid(vcpu: *Vcpu) void {
+    const guest_regs = vcpu.regs;
     var eax: u32 = undefined;
     var ebx: u32 = undefined;
     var ecx: u32 = undefined;
@@ -64,13 +65,8 @@ pub fn iret16(guest_state: *vmx.VMState) !void {
     vmwrite(.GUEST_RFLAGS, flags);
 }
 
-pub fn e820(guest_state: *vmx.VMState, guest_regs: *CpuState) void {
-    _ = guest_state;
-    _ = guest_regs;
-    @compileError("unimplemented");
-}
-
-pub fn rdmsr(guest_state: *vmx.VMState, guest_regs: *CpuState) void {
+pub fn rdmsr(vcpu: *Vcpu) void {
+    const guest_regs = vcpu.regs;
     const msr_kind: msr.All = @enumFromInt(guest_regs.rcx);
 
     const val: u64 = switch (msr_kind) {
@@ -89,7 +85,7 @@ pub fn rdmsr(guest_state: *vmx.VMState, guest_regs: *CpuState) void {
             break :blk @bitCast(val);
         },
         .KERNEL_GS_BASE => blk: {
-            const e = guest_state.guest_msr.find(msr_kind) orelse {
+            const e = vcpu.guest_msr.find(msr_kind) orelse {
                 std.debug.panic("RDMSR: MSR `{s}` is not registered\n", .{@tagName(msr_kind)});
             };
             break :blk e.data;
@@ -102,13 +98,14 @@ pub fn rdmsr(guest_state: *vmx.VMState, guest_regs: *CpuState) void {
     guest_regs.eax().* = @truncate(val);
 }
 
-pub fn wrmsr(guest_state: *vmx.VMState, guest_regs: *CpuState) void {
+pub fn wrmsr(vcpu: *Vcpu) void {
+    const guest_regs = vcpu.regs;
     const val = (@as(u64, guest_regs.edx().*) << 32) | @as(u64, guest_regs.eax().*);
     const msr_kind: msr.All = @enumFromInt(guest_regs.rcx);
 
     switch (msr_kind) {
         .STAR, .LSTAR, .CSTAR, .TSC_AUX, .SYSCALL_MASK, .KERNEL_GS_BASE => {
-            if (guest_state.guest_msr.find(msr_kind)) |e|
+            if (vcpu.guest_msr.find(msr_kind)) |e|
                 e.data = val
             else
                 std.debug.panic("WRMSR: MSR `{s}` is not registered\n", .{@tagName(msr_kind)});
@@ -122,6 +119,7 @@ pub fn wrmsr(guest_state: *vmx.VMState, guest_regs: *CpuState) void {
         },
         .GS_BASE => vmwrite(.GUEST_GS_BASE, val),
         .FS_BASE => vmwrite(.GUEST_FS_BASE, val),
+        _ => std.debug.panic("Unhandled WRMSR for 0x{x}\n", .{@intFromEnum(msr_kind)}),
         else => std.debug.panic("Unhandled WRMSR for {s}\n", .{@tagName(msr_kind)}),
     }
 }

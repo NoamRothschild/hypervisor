@@ -7,7 +7,7 @@ const msr = @import("msr.zig");
 const vmx = @import("vmx.zig");
 const vmread = vmx.vmread;
 const vmwrite = vmx.vmwrite;
-const CpuState = vmx.CpuState;
+const Vcpu = @import("vcpu.zig").Vcpu;
 
 pub const Cr0 = packed struct(u64) {
     /// protected mode enable
@@ -100,7 +100,7 @@ pub const Cr4 = packed struct(u64) {
     rsvd4: u39 = 0,
 };
 
-fn crPassthroughRead(guest_regs: *CpuState, exit_qual: vmx.ExitQualification.Cr) void {
+fn crPassthroughRead(vcpu: *Vcpu, exit_qual: vmx.ExitQualification.Cr) void {
     // read access to CR0 and CR4 does not cause a VM Exit
     // since all bits in the masks are set, reads from CR0 and CR4
     //  always return the values stored in the read shadows
@@ -109,11 +109,11 @@ fn crPassthroughRead(guest_regs: *CpuState, exit_qual: vmx.ExitQualification.Cr)
         else => @panic("unhandled path"),
     };
 
-    exit_qual.setVal(guest_regs, val);
+    exit_qual.setVal(vcpu, val);
 }
 
-fn crPassthroughWrite(guest_regs: *CpuState, exit_qual: vmx.ExitQualification.Cr) void {
-    var cr_val = exit_qual.getVal(guest_regs);
+fn crPassthroughWrite(vcpu: *Vcpu, exit_qual: vmx.ExitQualification.Cr) void {
+    var cr_val = exit_qual.getVal(vcpu);
     std.log.info("new CR{d} value: 0x{x}\n", .{ exit_qual.index, cr_val });
     switch (exit_qual.index) {
         0 => {
@@ -161,15 +161,15 @@ fn updateIa32e() void {
     vmx.vmwrite(.GUEST_IA32_EFER, efer_int);
 }
 
-pub fn crAccess(guest_regs: *CpuState, exit_qual: vmx.ExitQualification.Cr) void {
+pub fn crAccess(vcpu: *Vcpu, exit_qual: vmx.ExitQualification.Cr) void {
     std.log.info("guest tried to perform {s} on CR{d} from reg {s}\n", .{
         @tagName(exit_qual.access_type),
         exit_qual.index,
         @tagName(exit_qual.reg),
     });
     switch (exit_qual.access_type) {
-        .mov_to => crPassthroughWrite(guest_regs, exit_qual),
-        .mov_from => crPassthroughRead(guest_regs, exit_qual),
+        .mov_to => crPassthroughWrite(vcpu, exit_qual),
+        .mov_from => crPassthroughRead(vcpu, exit_qual),
         else => std.debug.panic("Unimplemented CR access request for {s}\n", .{@tagName(exit_qual.access_type)}),
     }
 }

@@ -5,8 +5,8 @@ const ept = @import("ept.zig");
 const msr = @import("msr.zig");
 const debug = @import("../debug.zig");
 const vmcs = @import("vmcs.zig");
-const simulate = @import("simulate.zig");
 const GuestAllocator = @import("../mem/guest_allocator.zig");
+const Vcpu = @import("vcpu.zig").Vcpu;
 const rdmsr = msr.rdmsr;
 const wrmsr = msr.wrmsr;
 
@@ -55,29 +55,20 @@ pub fn enableOperation() void {
         : .{ .memory = true });
 }
 
-pub var running_guest: *VMState = undefined;
-
 pub const VMState = struct {
-    /// phys addr
-    vmxon_region: u64,
-    /// phys addr
-    vmcs_region: u64,
     /// guest-physical addr of the guest's own PML4
     guest_cr3: u64,
     /// total guest RAM, identity-mapped from guest-physical 0
     guest_ram_block_count: u64,
-    /// virt addr, stack for vmm in VM-Exit state
-    vmm_stack: []align(4096) u8,
-    /// msr bitmap virt addr
+    /// msr bitmap virt addr, shared by the VMCS of every vcpu
     msr_bitmap: *[4096]u8,
     /// msr bitmap phys addr
     msr_bitmap_phys: u64,
     guest_pml4: *align(4096) [512]ept.EPT_PML4E,
     /// `.len` is always greater than 0
     guest_mem_pages: []*align(0x1000) [1 << 30]u8,
-
-    host_msr: msr.MsrArea,
-    guest_msr: msr.MsrArea,
+    /// per-core state, one entry per logical core of the guest
+    cpus: []Vcpu,
 
     pub const VMConfig = struct {
         os: enum { linux, windows } = .linux,
@@ -87,336 +78,51 @@ pub const VMState = struct {
     };
 
     /// initializes the given VMState, as long as
-    /// - calling vmxon
-    /// - setting up the vmcs
-    /// - loading the vmcs into the cpu (vmptrld)
     /// - initializing a basic EPT
+    /// - creating each vcpu: calling vmxon, setting up its vmcs, and loading
+    ///   the vmcs into the cpu (vmptrld)
+    ///
+    /// vmx operation must be enabled (`enableOperation`) on the calling core.
     pub fn prepare(self: *VMState, guest_allocator: *GuestAllocator, config: VMConfig) !void {
         if (config.vcpu_count != 1)
             @panic("vmx.VMState.prepare: vcpu count is more than 1 (unimplemented)");
 
         self.guest_ram_block_count = config.ram_block_count;
 
-        allocVmxonRegion(self) catch |err| {
-            std.log.err("VMXON failed: {s}\n", .{@errorName(err)});
-            return err;
-        };
-
-        std.log.info("VMXON succeeded\n", .{});
-
-        vmcs.allocRegion(self) catch |err| {
-            std.log.err("VMCS allocation or VMPTRLD failed: {s}\n", .{@errorName(err)});
-            return err;
-        };
-
-        // errors are logged inside the function
-        if (!vmcs.clear(self))
-            return error.clear_vmcs_failed;
-        if (!vmcs.load(self))
-            return error.vmcs_load_failed;
-
-        std.log.info("VMPTRLD succeeded\n", .{});
-
         const eptp = try ept.init(self, guest_allocator, config.ram_block_count);
-
-        self.vmm_stack = try mem_allocator.kalloc.allocPages(1);
-        @memset(self.vmm_stack, 0);
 
         const msr_bitmap_page = try mem_allocator.kalloc.allocPage();
         self.msr_bitmap = msr_bitmap_page;
         self.msr_bitmap_phys = hhdm.physOf(msr_bitmap_page);
         @memset(msr_bitmap_page.*[0..], 0xff);
 
-        try vmcs.setup(self, &mem_allocator.kalloc, eptp);
+        self.cpus = try mem_allocator.kalloc.alloc(Vcpu, config.vcpu_count);
+
+        // TODO: run this for each cpu, on that cpu
+        for (self.cpus, 0..) |*vcpu, i| {
+            try vcpu.init(self, i);
+
+            vcpu.vmxon() catch |err| {
+                std.log.err("VMXON failed: {s}\n", .{@errorName(err)});
+                return err;
+            };
+            std.log.info("VMXON succeeded\n", .{});
+
+            // errors are logged inside the functions
+            if (!vcpu.vmclear())
+                return error.clear_vmcs_failed;
+            if (!vcpu.vmptrld())
+                return error.vmcs_load_failed;
+            std.log.info("VMPTRLD succeeded\n", .{});
+
+            try vmcs.setup(vcpu, &mem_allocator.kalloc, eptp);
+        }
     }
 };
-
-/// Prepares the VMXON region and executes VMXON.
-pub fn allocVmxonRegion(guest_state: *VMState) !void {
-    const vmxon_page = try mem_allocator.kalloc.allocPage();
-    const vmxon_virt = @intFromPtr(vmxon_page);
-    const vmxon_region_phys = hhdm.physOf(vmxon_page);
-
-    std.log.info("virtual buff addr for VMXON at 0x{x}\n", .{vmxon_virt});
-    std.log.info("physical buff addr for VMXON at 0x{x}\n", .{vmxon_region_phys});
-
-    @memset(vmxon_page, 0);
-
-    const basic = rdmsr(.IA32_VMX_BASIC);
-    const revision_identifier: u32 = @truncate(basic);
-    std.log.info("IA32_VMX_BASIC revision identifier: 0x{x}\n", .{revision_identifier});
-
-    @as(*volatile u32, @ptrCast(vmxon_page)).* = revision_identifier;
-
-    // carry flag result
-    var failed: u8 = undefined;
-    // zero flag result
-    var valid_fail: u8 = undefined;
-
-    asm volatile (
-        \\ vmxon (%[vmxon_phys_ptr])
-        \\ setc %[failed]
-        \\ setz %[valid_fail]
-        : [failed] "=qm" (failed),
-          [valid_fail] "=qm" (valid_fail),
-        : [vmxon_phys_ptr] "r" (&vmxon_region_phys),
-    );
-
-    if (failed != 0)
-        return error.vmxon_failed_cf;
-
-    if (valid_fail != 0) {
-        debug.printf("vmxon failed with {d}\n", .{vmerr()});
-        return error.vmxon_failed_with_code;
-    }
-
-    guest_state.vmxon_region = vmxon_region_phys;
-}
 
 pub fn vmxoff() void {
     std.log.info("terminating vmx...\n", .{});
     asm volatile ("vmxoff");
-}
-
-/// calls vmlaunch.
-/// ret val indicates success of operation
-///
-/// returns either if vmlaunch failed
-/// or when after the VM caused an exit (will block)
-pub fn vmlaunch(guest_state: *VMState, guest_regs: *const CpuState) bool {
-    running_guest = guest_state;
-    vmcs.updateMsrs(guest_state);
-
-    const ret = asm volatile ("call __vmlaunch"
-        : [ret] "={al}" (-> u8),
-        : [regs] "{rdi}" (guest_regs),
-        : .{
-          .rcx = true,
-          .rdx = true,
-          .rsi = true,
-          .rdi = true,
-          .r8 = true,
-          .r9 = true,
-          .r10 = true,
-          .r11 = true,
-          .memory = true,
-        });
-    return ret != 0;
-}
-
-export var old_rbp: u64 = 0;
-export var old_rsp: u64 = 0;
-
-/// `rdi` points at the `CpuState` the guest should start with
-export fn __vmlaunch() callconv(.naked) void {
-    asm volatile (
-        \\ push %rbp
-        \\ mov %rsp, %rbp
-        \\ mov %rbp, old_rbp(%rip)
-        \\ mov %rsp, old_rsp(%rip)
-        \\
-        \\ mov %rdi, %rax
-        \\ mov 0(%rax), %r15
-        \\ mov 8(%rax), %r14
-        \\ mov 16(%rax), %r13
-        \\ mov 24(%rax), %r12
-        \\ mov 32(%rax), %r11
-        \\ mov 40(%rax), %r10
-        \\ mov 48(%rax), %r9
-        \\ mov 56(%rax), %r8
-        \\ mov 80(%rax), %rbp
-        \\ mov 88(%rax), %rbx
-        \\ mov 96(%rax), %rdx
-        \\ mov 104(%rax), %rcx
-        \\ mov 72(%rax), %rsi
-        \\ mov 64(%rax), %rdi
-        \\ mov 112(%rax), %rax
-        \\
-        \\ vmlaunch
-        \\
-        \\ call __vmlaunchFailed
-        \\ mov $0, %rax
-        \\ pop %rbp
-        \\ ret
-        ::: .{ .rax = true, .memory = true });
-}
-
-export fn __vmlaunchFailed() callconv(.c) void {
-    std.log.err("vmlaunch failed with error code: {d}\n", .{vmerr()});
-}
-
-/// Return to the `call __vmlaunch` site after a handled VM-exit.
-/// must be naked and entered with `jmp` (not `call`) so there is no C prologue.
-export fn __vmReturnSucceed() callconv(.naked) void {
-    asm volatile (
-        \\ mov old_rbp(%rip), %rbp
-        \\ mov old_rsp(%rip), %rsp
-        \\ mov $1, %rax
-        \\ pop %rbp
-        \\ ret
-        ::: .{ .rax = true, .rbp = true, .rsp = true });
-}
-
-pub fn vmExitHandler() callconv(.naked) void {
-    asm volatile (
-        \\ push %rax
-        \\ push %rcx
-        \\ push %rdx
-        \\ push %rbx
-        \\ push %rbp
-        \\ push %rsi
-        \\ push %rdi
-        \\ push %r8
-        \\ push %r9
-        \\ push %r10
-        \\ push %r11
-        \\ push %r12
-        \\ push %r13
-        \\ push %r14
-        \\ push %r15
-        \\
-        \\ // rbx is callee-saved under SysV.
-        \\ mov %rsp, %rbx
-        \\ mov %rbx, %rdi
-        \\
-        \\ // force the 16-byte alignment SysV wants
-        \\ and $-16, %rsp
-        \\ call mainVmExitHandler
-        \\
-        \\ // al is an `ExitAction`
-        \\ // exit(1) => stop and return to kmain
-        \\ cmp $1, %al
-        \\ je __vmReturnSucceed
-        \\
-        \\ // resume_at_rip(2) => the handler already set GUEST_RIP
-        \\ cmp $2, %al
-        \\ je 1f
-        \\ call resumeToNextInstruction
-        \\1:
-        \\ mov %rbx, %rsp
-        \\
-        \\ pop %r15
-        \\ pop %r14
-        \\ pop %r13
-        \\ pop %r12
-        \\ pop %r11
-        \\ pop %r10
-        \\ pop %r9
-        \\ pop %r8
-        \\ pop %rdi
-        \\ pop %rsi
-        \\ pop %rbp
-        \\ pop %rbx
-        \\ pop %rdx
-        \\ pop %rcx
-        \\ pop %rax
-        \\
-        \\ vmresume
-        \\
-        \\ call vmResumeInstructionFailed
-    );
-}
-
-/// What `vmExitHandler` does once `mainVmExitHandler` returns. values are matched in its asm.
-pub const ExitAction = enum(u8) {
-    /// advance RIP past the exiting instruction, then resume the guest
-    @"resume" = 0,
-    /// leave the guest and return to kmain
-    exit = 1,
-    /// resume the guest at GUEST_RIP as is, for handlers that set RIP themselves (e.g. an emulated IRET)
-    resume_at_rip = 2,
-};
-
-/// Returns what the VMM should do next, see `ExitAction`.
-export fn mainVmExitHandler(guest_regs: *CpuState) callconv(.c) ExitAction {
-    const exit_reason: ExitReason = @enumFromInt(vmread(.VM_EXIT_REASON) & 0xffff);
-    const exit_qual: ExitQualification = .{
-        .backing_int = vmread(.EXIT_QUALIFICATION),
-    };
-
-    std.log.info("vm exit! info: .{{ .reason = {s}, .qual = 0x{x}, .addr = 0x{x} }}\n", .{
-        @tagName(exit_reason),
-        exit_qual.backing_int,
-        vmread(.GUEST_RIP),
-    });
-
-    switch (exit_reason) {
-        .vmclear,
-        .vmptrld,
-        .vmptrst,
-        .vmread,
-        .vmresume,
-        .vmwrite,
-        .vmxoff,
-        .vmxon,
-        .vmlaunch,
-        => {},
-
-        .msr_read => {
-            simulate.rdmsr(running_guest, guest_regs);
-            return .@"resume";
-        },
-        .msr_write => {
-            simulate.wrmsr(running_guest, guest_regs);
-            return .@"resume";
-        },
-
-        .cr_access => {
-            simulate.crAccess(guest_regs, exit_qual.cr);
-            return .@"resume";
-        },
-
-        .exception_nmi => {
-            const intr_info = vmread(.VM_EXIT_INTR_INFO);
-            const vector = intr_info & 0xff;
-            const err_valid = (intr_info >> 11) & 1;
-            std.log.err(
-                "guest exception: vector {d} (info 0x{x}) err 0x{x}{s} at rip 0x{x}, linear 0x{x}, cr2-ish qual 0x{x}\n",
-                .{
-                    vector,
-                    intr_info,
-                    vmread(.VM_EXIT_INTR_ERROR_CODE),
-                    if (err_valid == 0) " (no err code)" else "",
-                    vmread(.GUEST_RIP),
-                    vmread(.GUEST_LINEAR_ADDRESS),
-                    exit_qual.backing_int,
-                },
-            );
-            return .exit;
-        },
-
-        .cpuid => simulate.cpuid(guest_regs),
-        .hlt => {
-            std.log.info("user executed hlt\n", .{});
-            return .exit;
-        },
-        .triple_fault => {
-            std.log.err("guest triple faulted at rip 0x{x}; not resuming\n", .{vmread(.GUEST_RIP)});
-            return .exit;
-        },
-        .invalid_guest_state => {
-            std.log.err("invalid guest state; not resuming\n", .{});
-            return .exit;
-        },
-        else => {
-            std.log.err("unhandled exit reason: {}; not resuming\n", .{exit_reason});
-            return .exit;
-        },
-    }
-    return .@"resume";
-}
-
-export fn resumeToNextInstruction() callconv(.c) void {
-    const current_rip = vmread(.GUEST_RIP);
-    const exit_instr_len = vmread(.VM_EXIT_INSTRUCTION_LEN);
-    vmwrite(.GUEST_RIP, current_rip +% exit_instr_len);
-}
-
-export fn vmResumeInstructionFailed() callconv(.c) noreturn {
-    std.log.err("vmresume failed with error code: {d}\n", .{vmerr()});
-
-    while (true)
-        asm volatile ("hlt");
 }
 
 /// reads the instruction error field to get the error code
@@ -457,43 +163,6 @@ pub fn adjustCr4(cr4: *u64) void {
     cr4.* |= cr4_fixed4;
     cr4.* &= cr4_fixed1;
 }
-
-pub const CpuState = extern struct {
-    r15: u64,
-    r14: u64,
-    r13: u64,
-    r12: u64,
-    r11: u64,
-    r10: u64,
-    r9: u64,
-    r8: u64,
-    rdi: u64,
-    rsi: u64,
-    rbp: u64,
-    rbx: u64,
-    rdx: u64,
-    rcx: u64,
-    rax: u64,
-
-    pub inline fn eax(self: *CpuState) *u32 {
-        return @ptrCast(&self.rax);
-    }
-    pub inline fn ebx(self: *CpuState) *u32 {
-        return @ptrCast(&self.rbx);
-    }
-    pub inline fn ecx(self: *CpuState) *u32 {
-        return @ptrCast(&self.rcx);
-    }
-    pub inline fn edx(self: *CpuState) *u32 {
-        return @ptrCast(&self.rdx);
-    }
-    pub inline fn esi(self: *CpuState) *u32 {
-        return @ptrCast(&self.rsi);
-    }
-    pub inline fn edi(self: *CpuState) *u32 {
-        return @ptrCast(&self.rdi);
-    }
-};
 
 pub const ExitQualification = packed union(u64) {
     backing_int: u64,
@@ -539,18 +208,18 @@ pub const ExitQualification = packed union(u64) {
         };
 
         /// writes `value` into the register the exiting `mov to cr` read from
-        pub fn setVal(self: @This(), regs: *CpuState, value: u64) void {
+        pub fn setVal(self: @This(), vcpu: *Vcpu, value: u64) void {
             switch (self.reg) {
                 .rsp => vmwrite(.GUEST_RSP, value),
-                inline else => |reg| @field(regs.*, @tagName(reg)) = value,
+                inline else => |reg| @field(vcpu.regs.*, @tagName(reg)) = value,
             }
         }
 
         /// reads the reg indicated by the `Register` field
-        pub fn getVal(self: @This(), regs: *CpuState) u64 {
+        pub fn getVal(self: @This(), vcpu: *Vcpu) u64 {
             return switch (self.reg) {
                 .rsp => vmread(.GUEST_RSP),
-                inline else => |v| @field(regs.*, @tagName(v)),
+                inline else => |v| @field(vcpu.regs.*, @tagName(v)),
             };
         }
     };
