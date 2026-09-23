@@ -6,6 +6,7 @@ const msr = @import("msr.zig");
 const vmx = @import("vmx.zig");
 const vmcs = @import("vmcs.zig");
 const ept = @import("ept.zig");
+const io = @import("io.zig");
 const simulate = @import("simulate.zig");
 const rdmsr = msr.rdmsr;
 const vmread = vmx.vmread;
@@ -32,6 +33,9 @@ pub const Vcpu = struct {
         /// locked with nothing enabled: VMX is hidden from the guest, so VMXON stays disabled
         feature_control: u64 = 1,
     },
+
+    serial: io.Serial,
+    pic: io.Pic,
 
     /// the guest's general purpose registers.
     /// while handling a VM-exit this points at the frame `vmExitHandler` pushed.
@@ -90,6 +94,8 @@ pub const Vcpu = struct {
         self.old_rsp = 0;
         self.old_rbp = 0;
         self.shadow_msrs = .{};
+        self.serial = .{};
+        self.pic = .init;
 
         self.vmm_stack = try mem_allocator.kalloc.allocPages(1);
         @memset(self.vmm_stack, 0);
@@ -295,19 +301,10 @@ pub const Vcpu = struct {
             .vmlaunch,
             => {},
 
-            .msr_read => {
-                try simulate.rdmsr(self);
-                return .@"resume";
-            },
-            .msr_write => {
-                try simulate.wrmsr(self);
-                return .@"resume";
-            },
-
-            .cr_access => {
-                try simulate.crAccess(self, exit_qual.cr);
-                return .@"resume";
-            },
+            .msr_read => try simulate.rdmsr(self),
+            .msr_write => try simulate.wrmsr(self),
+            .cr_access => try simulate.crAccess(self, exit_qual.cr),
+            .io_instruction => try simulate.handleIo(self, exit_qual.io),
 
             .exception_nmi => {
                 const intr_info = vmread(.VM_EXIT_INTR_INFO);
@@ -518,11 +515,12 @@ export fn mainVmExitHandler(vcpu: *Vcpu, guest_regs: *Vcpu.Regs) callconv(.c) Ex
         .backing_int = vmread(.EXIT_QUALIFICATION),
     };
 
-    std.log.info("vm exit! info: .{{ .reason = {s}, .qual = 0x{x}, .addr = 0x{x} }}\n", .{
-        @tagName(exit_reason),
-        exit_qual.backing_int,
-        vmread(.GUEST_RIP),
-    });
+    if (exit_reason != .io_instruction)
+        std.log.info("vm exit! info: .{{ .reason = {s}, .qual = 0x{x}, .addr = 0x{x} }}\n", .{
+            @tagName(exit_reason),
+            exit_qual.backing_int,
+            vmread(.GUEST_RIP),
+        });
 
     return vcpu.tryExitReason(exit_reason, exit_qual) catch |err| switch (err) {
         error.Aborted => {

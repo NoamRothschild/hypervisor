@@ -64,6 +64,21 @@ pub const VMState = struct {
     msr_bitmap: *[4096]u8,
     /// msr bitmap phys addr
     msr_bitmap_phys: ept.HostPhys,
+    /// io bitmaps, shared by the VMCS of every vcpu
+    io_bitmap: struct {
+        /// covers ports 0x0000-0x7fff
+        first: *[4096]u8,
+        /// covers ports 0x8000-0xffff
+        second: *[4096]u8,
+
+        /// makes the specified port get passed through to hardware
+        /// instead of causing a VMEXIT
+        pub fn passPort(self: *@This(), port: u16) void {
+            const bitmap = if (port < 0x8000) self.first else self.second;
+            const local_port = port % 0x8000;
+            bitmap[local_port / 8] &= ~(@as(u8, 1) << @truncate(local_port % 8));
+        }
+    },
     guest_pml4: *align(4096) [512]ept.EPT_PML4E,
     /// `.len` is always greater than 0
     guest_mem_pages: []*align(0x1000) [1 << 30]u8,
@@ -95,6 +110,20 @@ pub const VMState = struct {
         self.msr_bitmap = msr_bitmap_page;
         self.msr_bitmap_phys = hhdm.physOf(msr_bitmap_page);
         @memset(msr_bitmap_page.*[0..], 0xff);
+
+        // trap every port, then pass through the ones `io.zig` forwards to real
+        // hardware in both directions (a bitmap bit can't distinguish in/out)
+        self.io_bitmap = .{
+            .first = try mem_allocator.kalloc.allocPage(),
+            .second = try mem_allocator.kalloc.allocPage(),
+        };
+        @memset(self.io_bitmap.first.*[0..], 0xff);
+        @memset(self.io_bitmap.second.*[0..], 0xff);
+        // COM1 data register
+        self.io_bitmap.passPort(debug.COM1);
+        // PIT ports;  FIXME: this should be virtualized!
+        for (0x0040..0x0047 + 1) |port|
+            self.io_bitmap.passPort(@truncate(port));
 
         self.cpus = try mem_allocator.kalloc.alloc(Vcpu, config.vcpu_count);
 
@@ -167,6 +196,47 @@ pub fn adjustCr4(cr4: *u64) void {
 pub const ExitQualification = packed union(u64) {
     backing_int: u64,
     cr: Cr,
+    io: Io,
+
+    pub const Io = packed struct(u64) {
+        /// Size of access.
+        size: Size,
+        /// Direction of the attempted access.
+        direction: Direction,
+        /// String instruction.
+        string: bool,
+        /// Rep prefix.
+        rep: bool,
+        /// Operand encoding.
+        operand_encoding: OperandEncoding,
+        /// Not used.
+        rsvd2: u9,
+        /// Port number.
+        port: u16,
+        /// Not used.
+        rsvd3: u32,
+
+        const Size = enum(u3) {
+            /// Byte.
+            byte = 0,
+            /// Word.
+            word = 1,
+            /// Dword.
+            dword = 3,
+        };
+
+        const Direction = enum(u1) {
+            out = 0,
+            in = 1,
+        };
+
+        const OperandEncoding = enum(u1) {
+            /// I/O instruction uses DX register as port number.
+            dx = 0,
+            /// I/O instruction uses immediate value as port number.
+            imm = 1,
+        };
+    };
 
     pub const Cr = packed struct(u64) {
         index: u4,

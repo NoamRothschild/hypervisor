@@ -10,6 +10,7 @@ const vmwrite = vmx.vmwrite;
 const Vcpu = @import("vcpu.zig").Vcpu;
 
 pub const cpuid = @import("cpuid.zig").cpuid;
+pub const handleIo = @import("io.zig").handleIo;
 
 /// pops `@sizeOf(T)` bytes from the stack into return value.
 pub fn pop(comptime T: type, guest_state: *vmx.VMState, cr3_if_virt: ?ept.GuestPhys) !T {

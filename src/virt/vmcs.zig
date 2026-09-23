@@ -79,6 +79,8 @@ pub fn setup(vcpu: *Vcpu, kalloc: *KAlloc, eptp: ept.EPTP) !void {
         .optional(.CPU_BASED_HLT_EXITING),
         .optional(.CPU_BASED_ACTIVATE_SECONDARY_CONTROLS),
         .optional(.CPU_BASED_ACTIVATE_MSR_BITMAP),
+        // ports not cleared in the io bitmap exit with reason `io_instruction`
+        .required(.CPU_BASED_ACTIVATE_IO_BITMAP, error.IoBitmapUnsupported),
     }));
 
     vmwrite(.SECONDARY_VM_EXEC_CONTROL, try adjustControls(SecondaryVmExecutionControl, .IA32_VMX_PROCBASED_CTLS2, &.{
@@ -138,6 +140,8 @@ pub fn setup(vcpu: *Vcpu, kalloc: *KAlloc, eptp: ept.EPTP) !void {
     vmwrite(.GUEST_RFLAGS, 0x2);
 
     vmwrite(.MSR_BITMAP, vcpu.vm.msr_bitmap_phys.raw());
+    vmwrite(.IO_BITMAP_A, hhdm.physOf(vcpu.vm.io_bitmap.first).raw());
+    vmwrite(.IO_BITMAP_B, hhdm.physOf(vcpu.vm.io_bitmap.second).raw());
     try vcpu.setupMsrs(kalloc);
 
     vmwrite(.GUEST_SYSENTER_CS, rdmsr(.IA32_SYSENTER_CS));
