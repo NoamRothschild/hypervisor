@@ -6,8 +6,10 @@ const timer = @import("timer.zig");
 // const keyboard = @import("keyboard.zig");
 const log = @import("std").log;
 
-const pic_master_offset: u8 = 0x20;
-const pic_slave_offset: u8 = 0x28;
+/// host vector of IRQ0; IRQ n arrives at `user_intr_base + n`
+pub const user_intr_base: u8 = 0x20;
+const pic_master_offset: u8 = user_intr_base;
+const pic_slave_offset: u8 = user_intr_base + 8;
 
 const pic1: u16 = 0x20; // IO base address for master PIC
 const pic2: u16 = 0xA0; // IO base address for slave PIC
@@ -29,7 +31,21 @@ const icw4_buf_slave: u16 = 0x08; // Buffered mode/slave
 const icw4_buf_master: u16 = 0x0C; // Buffered mode/master
 const icw4_sfnm: u16 = 0x10; // Special fully nested (not)
 
-const cascade_irq: u16 = 2;
+pub const cascade_irq: u16 = 2;
+
+/// IRQs handled since the last `takeReceived`.
+/// bitset, bit n -> IRQ n
+var received: u16 = 0;
+
+/// returns the IRQs handled since the last call, and forgets them
+pub fn takeReceived() u16 {
+    return @atomicRmw(u16, &received, .Xchg, 0, .seq_cst);
+}
+
+/// sets the corresponding bit in `received` for the given irq
+fn setReceived(irq: u4) void {
+    _ = @atomicRmw(u16, &received, .Or, @as(u16, 1) << irq, .seq_cst);
+}
 
 pub fn remap(master_offset: u8, slave_offset: u8) void {
     outb(pic1_command, icw1_init | icw1_icw4); // starts the initialization sequence (in cascade mode)
@@ -60,19 +76,22 @@ pub fn init() void {
     timer.init(50); // TODO: change the frequency to not be an arbitrary value
 }
 
+pub fn notifyEoi(irq: u4) void {
+    if (irq >= 8)
+        outb(pic2_command, pic_eoi);
+    outb(pic1_command, pic_eoi);
+}
+
 export fn irqHandler(cpu_state: *cpuState) callconv(.c) void {
-    const irq_id = cpu_state.*.interrupt_id - 32; // [0..16)
-    defer {
-        if (irq_id >= 8) {
-            outb(pic_slave_offset, pic_eoi);
-        }
-        outb(pic_master_offset, pic_eoi);
-    }
-    switch (irq_id) {
+    const irq: u4 = @intCast(cpu_state.*.interrupt_id - user_intr_base);
+    defer notifyEoi(irq);
+
+    setReceived(irq);
+    switch (irq) {
         0 => timer.callback(),
         // 1 => keyboard.callback(),
         else => {
-            log.debug("an irq has been called from pic number {d}\n", .{irq_id});
+            log.debug("an irq has been called from pic number {d}\n", .{irq});
             log.debug("cpu state: {any}\n\n", .{cpu_state.*});
         },
     }

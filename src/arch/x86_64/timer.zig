@@ -7,8 +7,8 @@ var tick: usize = 0;
 
 // called when IRQ0 is called in the idt. see pic.zig
 pub fn callback() void {
+    // debug.printf("T~", .{});
     tick +%= 1;
-    // log.debug("T{d} ", .{tick});
 }
 
 // https://web.archive.org/web/20220723171914/http://www.jamesmolloy.co.uk/tutorial_html/5.-IRQs%20and%20the%20PIT.html

@@ -90,7 +90,7 @@ inline fn initTable() void {
         });
 
     // irq gates
-    inline for (32..48) |i|
+    inline for (pic.user_intr_base..pic.user_intr_base + 16) |i|
         entries[i] = makeState(.{
             .offset = irqAddress(i),
             .segment_selector = .{

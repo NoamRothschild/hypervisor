@@ -8,6 +8,7 @@ const vmcs = @import("vmcs.zig");
 const ept = @import("ept.zig");
 const io = @import("io.zig");
 const simulate = @import("simulate.zig");
+const pic_hw = @import("../arch/x86_64/pic.zig");
 const rdmsr = msr.rdmsr;
 const vmread = vmx.vmread;
 const vmwrite = vmx.vmwrite;
@@ -36,6 +37,8 @@ pub const Vcpu = struct {
 
     serial: io.Serial,
     pic: io.Pic,
+    /// host IRQs not yet injected into the guest, bit n is IRQ n. filled from `pic.takeReceived`.
+    pending_irq: u16,
 
     /// the guest's general purpose registers.
     /// while handling a VM-exit this points at the frame `vmExitHandler` pushed.
@@ -96,6 +99,7 @@ pub const Vcpu = struct {
         self.shadow_msrs = .{};
         self.serial = .{};
         self.pic = .init;
+        self.pending_irq = 0;
 
         self.vmm_stack = try mem_allocator.kalloc.allocPages(1);
         @memset(self.vmm_stack, 0);
@@ -326,9 +330,24 @@ pub const Vcpu = struct {
             },
 
             .cpuid => try simulate.cpuid(self),
+            .external_interrupt => {
+                // no ack-on-exit, so the IRQ is still pending in the PIC, and IF is 0 after
+                // any VM-exit. open a window for the host to take it: `pic.irqHandler` records
+                // it and sends the EOI, `injectExtIntr` picks it up.
+                asm volatile ("sti; nop; cli");
+                _ = self.injectExtIntr();
+                return .resume_at_rip;
+            },
             .hlt => {
-                std.log.info("user executed hlt\n", .{});
-                return .exit;
+                if (vmread(.GUEST_RFLAGS) & rflags_if == 0) {
+                    std.log.info("guest halted with interrupts disabled\n", .{});
+                    return .exit;
+                }
+                // the hlt is stepped over on resume, so an `sti; hlt` shadow ends with it
+                vmwrite(.GUEST_INTERRUPTIBILITY_INFO, 0);
+                // sleep until an IRQ the guest can take arrives
+                while (!self.injectExtIntr())
+                    asm volatile ("sti; hlt; cli");
             },
             .triple_fault => {
                 std.log.err("guest triple faulted at rip 0x{x}; not resuming\n", .{vmread(.GUEST_RIP)});
@@ -346,6 +365,38 @@ pub const Vcpu = struct {
         return .@"resume";
     }
 
+    /// sets up the next VM-entry to deliver the lowest pending IRQ the guest can take
+    /// right now. returns whether one was injected.
+    /// the host already sent the EOI, so the guest's own EOIs are dropped (see `io.zig`).
+    fn injectExtIntr(self: *Vcpu) bool {
+        const pic = &self.pic;
+
+        self.pending_irq |= pic_hw.takeReceived();
+        if (self.pending_irq == 0) return false;
+        // no vector base from the guest yet
+        if (pic.primary_phase != .initialized) return false;
+        if (vmread(.GUEST_RFLAGS) & rflags_if == 0) return false;
+        // blocking by STI or MOV SS, VM-entry fails if an interrupt is injected during either
+        if (vmread(.GUEST_INTERRUPTIBILITY_INFO) & 0b11 != 0) return false;
+
+        const secondary_masked = pic.primary_mask & (1 << pic_hw.cascade_irq) != 0;
+        const masked: u16 = @as(u16, if (secondary_masked) 0xff else pic.secondary_mask) << 8 | pic.primary_mask;
+        const injectable = self.pending_irq & ~masked;
+        if (injectable == 0) return false;
+
+        const irq: u4 = @intCast(@ctz(injectable));
+        const vector: u8 = if (irq < 8) pic.primary_base + irq else pic.secondary_base + (irq - 8);
+        const info: vmx.EntryIntrInfo = .{
+            .vector = vector,
+            .type = .external,
+            .ec_available = false,
+            .valid = true,
+        };
+        vmwrite(.VM_ENTRY_INTR_INFO_FIELD, @as(u32, @bitCast(info)));
+        self.pending_irq &= ~(@as(u16, 1) << irq);
+        return true;
+    }
+
     /// calls vmlaunch.
     /// ret val indicates success of operation
     ///
@@ -354,6 +405,8 @@ pub const Vcpu = struct {
     pub fn vmlaunch(self: *Vcpu, guest_regs: *Regs) bool {
         self.regs = guest_regs;
         self.updateMsrs();
+        // IRQs from before the guest existed aren't its to receive
+        _ = pic_hw.takeReceived();
 
         const ret = asm volatile ("call __vmlaunch"
             : [ret] "={al}" (-> u8),
@@ -494,6 +547,8 @@ pub fn vmExitHandler() callconv(.naked) void {
             \\ call vmResumeInstructionFailed
         , .{ .vcpu_slot = Vcpu.exit_frame_size }));
 }
+
+const rflags_if: u64 = 1 << 9;
 
 /// What `vmExitHandler` does once `mainVmExitHandler` returns. values are matched in its asm.
 pub const ExitAction = enum(u8) {

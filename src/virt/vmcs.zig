@@ -94,11 +94,12 @@ pub fn setup(vcpu: *Vcpu, kalloc: *KAlloc, eptp: ept.EPTP) !void {
     }));
     vmwrite(.EPT_POINTER, @bitCast(eptp));
 
-    vmwrite(.PIN_BASED_VM_EXEC_CONTROL, try adjustControls(u64, .IA32_VMX_PINBASED_CTLS, &.{}));
+    vmwrite(.PIN_BASED_VM_EXEC_CONTROL, try adjustControls(PinBasedVmExecutionControl, .IA32_VMX_PINBASED_CTLS, &.{
+        .required(.PIN_BASED_EXT_INTR_EXITING, error.ExternalInterruptsExitUnsupported),
+    }));
 
     vmwrite(.VM_EXIT_CONTROLS, try adjustControls(VmExitControl, .IA32_VMX_EXIT_CTLS, &.{
         .optional(.VM_EXIT_IA32E_MODE),
-        .optional(.VM_EXIT_ACK_INTR_ON_EXIT),
         // restores the host's EFER, since the guest runs with EFER=0
         .required(.VM_EXIT_LOAD_IA32_EFER, error.EferControlsUnsupported),
         .optional(.VM_EXIT_SAVE_IA32_EFER),
@@ -340,6 +341,14 @@ pub const SecondaryVmExecutionControl = enum(u32) {
     CPU_BASED_CTL2_ENABLE_INVPCID = 0x1000,
     CPU_BASED_CTL2_UNRESTRICTED_GUEST = 0x80,
     CPU_BASED_CTL2_ENABLE_VMFUNC = 0x2000,
+};
+
+pub const PinBasedVmExecutionControl = enum(u32) {
+    PIN_BASED_EXT_INTR_EXITING = 0x00000001,
+    PIN_BASED_NMI_EXITING = 0x00000008,
+    PIN_BASED_VIRTUAL_NMIS = 0x00000020,
+    PIN_BASED_VMX_PREEMPTION_TIMER = 0x00000040,
+    PIN_BASED_POSTED_INTR = 0x00000080,
 };
 
 pub const VmEntryControl = enum(u32) {

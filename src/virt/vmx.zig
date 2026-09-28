@@ -295,6 +295,28 @@ pub const ExitQualification = packed union(u64) {
     };
 };
 
+/// the VM-entry interruption-information field: an event VM-entry delivers
+/// through the guest's IDT, as if it had just occurred.
+/// ref: SDM Vol.3C, "VM-Entry Controls for Event Injection"
+pub const EntryIntrInfo = packed struct(u32) {
+    vector: u8,
+    type: Type,
+    /// deliver `VM_ENTRY_EXCEPTION_ERROR_CODE` with the event
+    ec_available: bool,
+    rsvd: u19 = 0,
+    valid: bool,
+
+    pub const Type = enum(u3) {
+        external = 0,
+        nmi = 2,
+        hw_exception = 3,
+        sw_interrupt = 4,
+        priv_sw_exception = 5,
+        sw_exception = 6,
+        other = 7,
+    };
+};
+
 pub const ExitReason = enum(u64) {
     exception_nmi = 0,
     external_interrupt = 1,
