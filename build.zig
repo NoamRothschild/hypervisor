@@ -85,7 +85,10 @@ pub fn build(b: *std.Build) void {
     _ = wf.addCopyFile(b.path("src/grub.cfg"), "tmpsys/kernel/boot/grub/grub.cfg");
 
     // the guest kernel, handed to us by GRUB as a multiboot2 module (see grub.cfg)
-    _ = wf.addCopyFile(b.path("src/linuxBzImage"), "tmpsys/kernel/boot/linuxBzImage");
+    _ = wf.addCopyFile(b.path("src/os/linux/linuxBzImage"), "tmpsys/kernel/boot/linuxBzImage");
+
+    // the guest root filesystem, handed to us by GRUB as a multiboot2 module (see grub.cfg)
+    _ = wf.addCopyFile(b.path("src/os/linux/rootfs.cpio.gz"), "tmpsys/kernel/boot/rootfs.cpio.gz");
 
     // taking the temp system directory and copying into the global system dir its contents
     const copy_built_system = b.addInstallDirectory(.{

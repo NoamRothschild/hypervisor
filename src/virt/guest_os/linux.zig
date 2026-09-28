@@ -32,13 +32,24 @@ pub const layout = struct {
 };
 
 /// The cmdline the bzImage is given in grub.cfg, which is how we find it again.
-pub const module_name = "linux_bz_img";
+pub const kernel_module_name = "linux_bz_img";
+
+/// The cmdline the rootfs.cpio.gz is given in grub.cfg, which is how we find it again.
+pub const rootfs_module_name = "linux_rootfs";
 
 /// The guest kernel, loaded by GRUB as a multiboot2 module
 /// requires `hhdm.init()` to have run.
 fn kernelImg() []const u8 {
-    const mod = mbt2.findModule(module_name) orelse
+    const mod = mbt2.findModule(kernel_module_name) orelse
         @panic("GRUB linux kernel module missing");
+    return mod.data();
+}
+
+/// The guest rootfs, loaded by GRUB as a multiboot2 module
+/// requires `hhdm.init()` to have run.
+fn kernelRootFs() []const u8 {
+    const mod = mbt2.findModule(rootfs_module_name) orelse
+        @panic("GRUB linux rootfs module missing");
     return mod.data();
 }
 
@@ -46,6 +57,8 @@ fn kernelImg() []const u8 {
 pub fn load(dst_guest: *vmx.VMState) !void {
     const img = kernelImg();
     var bp: BootParams = .fromBzImage(img);
+
+    const rootfs_raw = kernelRootFs();
 
     // Setup necessary fields
     bp.hdr.type_of_loader = 0xFF;
@@ -56,6 +69,8 @@ pub fn load(dst_guest: *vmx.VMState) !void {
     bp.hdr.loadflags.keep_segments = false;
     bp.hdr.cmd_line_ptr = layout.cmdline;
     bp.hdr.vid_mode = 0xFFFF; // VGA (normal)
+    bp.hdr.ramdisk_image = layout.initrd;
+    bp.hdr.ramdisk_size = @truncate(rootfs_raw.len);
 
     bp.addE820Entry(.{
         .addr = 0,
@@ -80,5 +95,10 @@ pub fn load(dst_guest: *vmx.VMState) !void {
         dst_guest,
         img[code_offset .. code_offset + code_size],
         .from(layout.kernel_base),
+    );
+    try ept.writeGuest(
+        dst_guest,
+        rootfs_raw,
+        .from(layout.initrd),
     );
 }

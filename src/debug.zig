@@ -27,6 +27,8 @@ pub inline fn wait() void {
 
 pub const COM1 = 0x03F8;
 
+pub const debug_logging_enabled = false;
+
 fn serialDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
     for (w.buffer[0..w.end]) |byte| outb(COM1, byte);
     w.end = 0;
@@ -35,12 +37,14 @@ fn serialDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io
 
     var written: usize = 0;
     for (data[0 .. data.len - 1]) |bytes| {
-        for (bytes) |byte| outb(COM1, byte);
+        if (comptime debug_logging_enabled)
+            for (bytes) |byte| outb(COM1, byte);
         written += bytes.len;
     }
     const pattern = data[data.len - 1];
     for (0..splat) |_| {
-        for (pattern) |byte| outb(COM1, byte);
+        if (comptime debug_logging_enabled)
+            for (pattern) |byte| outb(COM1, byte);
         written += pattern.len;
     }
     return written;

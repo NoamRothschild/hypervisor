@@ -74,6 +74,10 @@ pub fn remap(master_offset: u8, slave_offset: u8) void {
 pub fn init() void {
     remap(pic_master_offset, pic_slave_offset);
     timer.init(50); // TODO: change the frequency to not be an arbitrary value
+
+    // make COM1 raise IRQ4 when a byte is received and when it finished sending a byte.
+    // the guest's own writes to IER never reach the hardware (`virt/io.zig` only stores them in `vcpu.serial.ier`)
+    outb(debug.COM1 + 1, 0b0000_0011);
 }
 
 pub fn notifyEoi(irq: u4) void {
@@ -90,6 +94,8 @@ export fn irqHandler(cpu_state: *cpuState) callconv(.c) void {
     switch (irq) {
         0 => timer.callback(),
         // 1 => keyboard.callback(),
+        // COM1, only forwarded to the guest.
+        4 => {},
         else => {
             log.debug("an irq has been called from pic number {d}\n", .{irq});
             log.debug("cpu state: {any}\n\n", .{cpu_state.*});
