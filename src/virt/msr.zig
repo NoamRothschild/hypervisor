@@ -26,6 +26,19 @@ pub inline fn wrmsr(msr_id: All, value: u64) void {
         : .{ .memory = true });
 }
 
+/// MSRs the guest's CPU doesn't have. accessing one raises #GP, as on hardware.
+pub fn isAbsent(id: All) bool {
+    const AbsetValue = enum(u32) {
+        AMD64_DE_CFG = 0xc0011029, // AMD only
+        _,
+    };
+    return switch (@as(AbsetValue, @enumFromInt(@intFromEnum(id)))) {
+        // Linux probes it with rdmsr_safe even on Intel (LFENCE_RDTSC is set there too)
+        .AMD64_DE_CFG => true,
+        _ => false,
+    };
+}
+
 /// Intel defined MSRs.
 /// source: https://elixir.bootlin.com/linux/v4.2/source/arch/x86/include/asm/msr-index.h#L375
 pub const All = enum(u32) {

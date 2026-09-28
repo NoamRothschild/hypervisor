@@ -305,8 +305,12 @@ pub const Vcpu = struct {
             .vmlaunch,
             => {},
 
-            .msr_read => try simulate.rdmsr(self),
-            .msr_write => try simulate.wrmsr(self),
+            .msr_read, .msr_write => if (msr.isAbsent(@enumFromInt(self.regs.ecx().*)))
+                return self.injectGp()
+            else if (exit_reason == .msr_read)
+                try simulate.rdmsr(self)
+            else
+                try simulate.wrmsr(self),
             .cr_access => try simulate.crAccess(self, exit_qual.cr),
             .io_instruction => try simulate.handleIo(self, exit_qual.io),
 
@@ -395,6 +399,20 @@ pub const Vcpu = struct {
         vmwrite(.VM_ENTRY_INTR_INFO_FIELD, @as(u32, @bitCast(info)));
         self.pending_irq &= ~(@as(u16, 1) << irq);
         return true;
+    }
+
+    /// makes the next VM-entry raise #GP(0) in the guest, as hardware does for an
+    /// instruction it refuses.
+    pub fn injectGp(_: *Vcpu) ExitAction {
+        const info: vmx.EntryIntrInfo = .{
+            .vector = 13, // #GP
+            .type = .hw_exception,
+            .ec_available = true,
+            .valid = true,
+        };
+        vmwrite(.VM_ENTRY_EXCEPTION_ERROR_CODE, 0);
+        vmwrite(.VM_ENTRY_INTR_INFO_FIELD, @as(u32, @bitCast(info)));
+        return .resume_at_rip;
     }
 
     /// calls vmlaunch.
