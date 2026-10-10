@@ -588,12 +588,21 @@ export fn mainVmExitHandler(vcpu: *Vcpu, guest_regs: *Vcpu.Regs) callconv(.c) Ex
         .backing_int = vmread(.EXIT_QUALIFICATION),
     };
 
-    if (exit_reason != .io_instruction)
-        std.log.info("vm exit! info: .{{ .reason = {s}, .qual = 0x{x}, .addr = 0x{x} }}\n", .{
-            @tagName(exit_reason),
-            exit_qual.backing_int,
-            vmread(.GUEST_RIP),
-        });
+    const old_debug_enable = debug.logging_enabled;
+    defer debug.logging_enabled = old_debug_enable;
+    switch (exit_reason) {
+        .io_instruction,
+        .cr_access,
+        .external_interrupt,
+        => debug.logging_enabled = false,
+        else => {},
+    }
+
+    std.log.info("vm exit! info: .{{ .reason = {s}, .qual = 0x{x}, .addr = 0x{x} }}\n", .{
+        @tagName(exit_reason),
+        exit_qual.backing_int,
+        vmread(.GUEST_RIP),
+    });
 
     return vcpu.tryExitReason(exit_reason, exit_qual) catch |err| switch (err) {
         error.Aborted => {

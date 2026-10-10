@@ -3,6 +3,7 @@ const debug = @import("../../debug.zig");
 const assert = std.debug.assert;
 const vmx = @import("../vmx.zig");
 const ept = @import("../ept.zig");
+const mptable = @import("../mptable.zig");
 const mbt2 = @import("../../arch/x86_64/multiboot2.zig");
 const gdt32 = @import("../../arch/x86/gdt.zig");
 const bootparams = @import("linux_bootparams.zig");
@@ -72,16 +73,32 @@ pub fn load(dst_guest: *vmx.VMState) !void {
     bp.hdr.ramdisk_image = layout.initrd;
     bp.hdr.ramdisk_size = @truncate(rootfs_raw.len);
 
+    // base memory, up to the MP tables in its last KB
     bp.addE820Entry(.{
         .addr = 0,
-        .size = (1 << 30) * dst_guest.guest_mem_pages.len,
+        .size = mptable.base.raw(),
         .type = .ram,
     });
+    // the MP tables, and the VGA/BIOS hole up to 1MB, as on a PC
+    bp.addE820Entry(.{
+        .addr = mptable.base.raw(),
+        .size = layout.kernel_base - mptable.base.raw(),
+        .type = .reserved,
+    });
+    bp.addE820Entry(.{
+        .addr = layout.kernel_base,
+        .size = (1 << 30) * dst_guest.guest_mem_pages.len - layout.kernel_base,
+        .type = .ram,
+    });
+    try mptable.write(dst_guest, .{ .cpu_count = @intCast(dst_guest.cpus.len) });
 
     const cmdline_max_size = if (bp.hdr.cmdline_size < 256) bp.hdr.cmdline_size else 256;
-    const cmdline_val = "console=ttyS0 earlyprintk=serial nokaslr";
-    try ept.writeGuest(dst_guest, cmdline_val, .from(layout.cmdline));
-    try ept.memsetGuest(dst_guest, 0, .from(layout.cmdline + cmdline_val.len), cmdline_max_size - cmdline_val.len);
+    var cmdline_val: [256]u8 = @splat(0);
+    _ = std.fmt.bufPrint(cmdline_val[0..cmdline_max_size], "console=ttyS0 earlyprintk=serial nokaslr apic=debug nr_cpus={d} acpi=off", .{dst_guest.cpus.len}) catch |err| {
+        std.log.err("provided guest cmdline too long!", .{});
+        return err;
+    };
+    try ept.writeGuest(dst_guest, cmdline_val[0..], .from(layout.cmdline));
 
     const guest_gdt = gdt32.flatProtectedMode();
     try ept.writeGuest(dst_guest, std.mem.asBytes(&guest_gdt), .from(layout.gdt));

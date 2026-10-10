@@ -86,6 +86,12 @@ pub fn rdmsr(vcpu: *Vcpu) error{Aborted}!void {
             // ^^ cpuid, eax=1
             break :blk msr.rdmsr(.IA32_UCODE_REV);
         },
+        .IA32_APIC_BASE => @bitCast(msr.IA32_APIC_BASE{
+            .bsp = vcpu.index == 0,
+            .x2apic_enable = false,
+            .apic_global_enable = true,
+            .base_page = 0xFEE00000 >> 12,
+        }),
         .IA32_ARCH_CAPABILITIES => msr.rdmsr(.IA32_ARCH_CAPABILITIES),
         .IA32_PLATFORM_ID => msr.rdmsr(.IA32_PLATFORM_ID),
         _ => if (msr.isMcBankMsr(guest_regs.ecx().*))

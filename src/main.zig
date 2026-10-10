@@ -90,7 +90,10 @@ pub fn kmain() !void {
         std.log.info("vmx enabled\n", .{});
 
         defer vmx.vmxoff();
-        try guest_state.prepare(&guest_alloc, .{});
+        try guest_state.prepare(&guest_alloc, .{
+            .ram_block_count = 2, // 2GB memory
+            .vcpu_count = 2,
+        });
         try linux.load(guest_state);
 
         // TODO: run this for each vcpu, on its own core

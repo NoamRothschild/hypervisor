@@ -13,9 +13,9 @@ const address = @import("../mem/address.zig");
 /// physical address in the host's address space
 pub const HostPhys = address.HostPhys;
 /// physical address in the guest's address space, translated by EPT
-pub const GuestPhys = address.Address(.guest_phys);
+pub const GuestPhys = address.Address(.guest_phys, .{});
 /// virtual address in the guest's address space, translated by the guest's own page tables
-pub const GuestVirt = address.Address(.guest_virt);
+pub const GuestVirt = address.Address(.guest_virt, .{});
 
 /// EPT pointer
 pub const EPTP = packed struct(u64) {

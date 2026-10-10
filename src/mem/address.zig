@@ -15,9 +15,12 @@ pub const Kind = enum {
     guest_virt,
 };
 
-/// A 64-bit address of one `Kind`. Each kind is its own type.
-pub fn Address(comptime kind: Kind) type {
-    return enum(u64) {
+/// A `extra.backing`-bit address of one `Kind`. Each kind is its own type.
+pub fn Address(comptime kind: Kind, comptime extra: struct {
+    backing: type = u64,
+}) type {
+    return enum(extra.backing) {
+        null = 0,
         _,
 
         /// a container that doesn't capture its comptime arguments is deduplicated
@@ -41,12 +44,12 @@ pub fn Address(comptime kind: Kind) type {
     };
 }
 
-pub const HostPhys = Address(.host_phys);
-pub const HostVirt = Address(.host_virt);
+pub const HostPhys = Address(.host_phys, .{});
+pub const HostVirt = Address(.host_virt, .{});
 
 comptime {
     // guards the dedup pitfall described in `Address`
-    const kinds = [_]type{ Address(.host_phys), Address(.host_virt), Address(.guest_phys), Address(.guest_virt) };
+    const kinds = [_]type{ Address(.host_phys, .{}), Address(.host_virt, .{}), Address(.guest_phys, .{}), Address(.guest_virt, .{}) };
     for (kinds, 0..) |a, i|
         for (kinds[i + 1 ..]) |b|
             if (a == b) @compileError("address kinds must be distinct types");

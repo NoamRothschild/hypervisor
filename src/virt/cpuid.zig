@@ -3,7 +3,7 @@ const debug = @import("../debug.zig");
 const Vcpu = @import("vcpu.zig").Vcpu;
 
 // TODO: move sig to a move visible place place,
-pub const hypervisor_sig = "NoamRTD HV\x00\x00".*;
+pub const hypervisor_sig = "NoamRTD HV\x00\x00";
 
 pub const Leaf = enum(u32) {
     /// Maximum input value for basic CPUID.
@@ -70,6 +70,9 @@ pub const ExtFeatureEbx0 = packed struct(u32) {
 
 var features = debug.CpuFeatures{
     .pcid = 1,
+    .apic = 1,
+    .ecx_tsc_deadline = 0,
+    .x2apic = 0,
     .hypervisor = 1,
     .fpu = 1,
     .vme = 1,
@@ -136,8 +139,11 @@ pub fn cpuid(vcpu: *Vcpu) error{Aborted}!void {
             if (debug.getFeatures().pcid == 0)
                 features.pcid = 0;
 
+            var ebx: Leaf1Ebx = @bitCast(orig.ebx);
+            ebx.initial_apic_id = @truncate(vcpu.index);
+
             guest_regs.eax().* = orig.eax; // version information.
-            guest_regs.ebx().* = orig.ebx; // brand index / CLFLUSH line size / Addressable IDs / Initial APIC ID
+            guest_regs.ebx().* = @bitCast(ebx);
             guest_regs.ecx().* = @truncate(@as(u64, @bitCast(features)));
             guest_regs.edx().* = @truncate(@as(u64, @bitCast(features)) >> 32);
         },
@@ -199,3 +205,13 @@ fn invalid(vcpu: *Vcpu) void {
     vcpu.regs.ecx().* = 0;
     vcpu.regs.edx().* = 0;
 }
+
+/// CPUID leaf 1, EBX
+pub const Leaf1Ebx = packed struct(u32) {
+    brand_index: u8,
+    /// value * 8 = bytes
+    clflush_line_size: u8,
+    /// logical processors per package
+    max_logical_ids: u8,
+    initial_apic_id: u8,
+};

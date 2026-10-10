@@ -99,6 +99,7 @@ pub const All = enum(u32) {
     MSR_RAPL_POWER_UNIT = 0x00000606,
     MSR_PLATFORM_INFO = 0x000000ce,
     IA32_MCG_CAP = 0x00000179,
+    IA32_APIC_BASE = 0x0000001b,
     _,
 
     pub fn read(self: @This()) u64 {
@@ -297,4 +298,18 @@ pub const IA32_VMX_EPT_VPID_CAP = packed struct(u64) {
     /// Maximum HLAT prefix size, in paging-structure entries.
     max_hlat_prefix_size: u6,
     rsvd9: u10,
+};
+
+pub const IA32_APIC_BASE = packed struct(u64) {
+    rsvd0: u8 = 0,
+    /// bootstrap processor
+    bsp: bool,
+    rsvd1: u1 = 0,
+    /// EXTD
+    x2apic_enable: bool,
+    /// EN
+    apic_global_enable: bool,
+    /// APIC base address >> 12; width = MAXPHYADDR-12, upper bits reserved
+    base_page: u24,
+    rsvd2: u28 = 0,
 };

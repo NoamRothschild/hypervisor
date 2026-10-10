@@ -87,7 +87,7 @@ pub const VMState = struct {
 
     pub const VMConfig = struct {
         os: enum { linux, windows } = .linux,
-        vcpu_count: usize = 1,
+        vcpu_count: u8 = 1,
         /// each block size is 1GB
         ram_block_count: usize = 2,
     };
@@ -99,9 +99,6 @@ pub const VMState = struct {
     ///
     /// vmx operation must be enabled (`enableOperation`) on the calling core.
     pub fn prepare(self: *VMState, guest_allocator: *GuestAllocator, config: VMConfig) !void {
-        if (config.vcpu_count != 1)
-            @panic("vmx.VMState.prepare: vcpu count is more than 1 (unimplemented)");
-
         self.guest_ram_block_count = config.ram_block_count;
 
         const eptp = try ept.init(self, guest_allocator, config.ram_block_count);
@@ -128,7 +125,10 @@ pub const VMState = struct {
         self.cpus = try mem_allocator.kalloc.alloc(Vcpu, config.vcpu_count);
 
         // TODO: run this for each cpu, on that cpu
-        for (self.cpus, 0..) |*vcpu, i| {
+        // for (self.cpus, 0..) |*vcpu, i| {
+        {
+            const vcpu = &self.cpus[0];
+            const i = 0;
             try vcpu.init(self, i);
 
             vcpu.vmxon() catch |err| {
