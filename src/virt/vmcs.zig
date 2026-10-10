@@ -153,7 +153,9 @@ pub fn setup(vcpu: *Vcpu, kalloc: *KAlloc, eptp: ept.EPTP) !void {
     vmwrite(.HOST_IA32_SYSENTER_EIP, rdmsr(.IA32_SYSENTER_EIP));
     vmwrite(.HOST_IA32_SYSENTER_ESP, rdmsr(.IA32_SYSENTER_ESP));
 
-    vmwrite(.GUEST_RSP, vcpu.vm.guest_ram_block_count * GuestAllocator.block_size);
+    // top of the RAM below the MMIO hole, so the stack is RAM even for a 32-bit guest
+    const low_blocks: u64 = @min(vcpu.vm.guest_ram_block_count, ept.mmio_hole_start.raw() >> 30);
+    vmwrite(.GUEST_RSP, low_blocks * GuestAllocator.block_size);
     vmwrite(.GUEST_RIP, 0);
 
     vmwrite(.HOST_RSP, vcpu.hostRsp());

@@ -85,11 +85,21 @@ pub fn load(dst_guest: *vmx.VMState) !void {
         .size = layout.kernel_base - mptable.base.raw(),
         .type = .reserved,
     });
+    // RAM up to the MMIO hole, the rest of it is above the hole, see `ept.mmio_hole_start`
+    const block_count = dst_guest.guest_mem_pages.len;
+    const low_blocks: usize = @min(block_count, ept.mmio_hole_start.raw() >> 30);
     bp.addE820Entry(.{
         .addr = layout.kernel_base,
-        .size = (1 << 30) * dst_guest.guest_mem_pages.len - layout.kernel_base,
+        .size = (1 << 30) * low_blocks - layout.kernel_base,
         .type = .ram,
     });
+    if (block_count > low_blocks) {
+        bp.addE820Entry(.{
+            .addr = ept.mmio_hole_end.raw(),
+            .size = (1 << 30) * (block_count - low_blocks),
+            .type = .ram,
+        });
+    }
     try mptable.write(dst_guest, .{ .cpu_count = @intCast(dst_guest.cpus.len) });
 
     const cmdline_max_size = if (bp.hdr.cmdline_size < 256) bp.hdr.cmdline_size else 256;

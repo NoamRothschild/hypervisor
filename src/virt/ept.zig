@@ -346,6 +346,39 @@ const guest_pdpt_gpa = 0x2000;
 const HugePage = [1 << 30]u8;
 const HugePagePtr = *align(0x1000) HugePage;
 
+/// Guest physical 3GB-4GB holds no RAM and is left unmapped for device MMIO.
+pub const mmio_hole_start: GuestPhys = .from(3 << 30);
+pub const mmio_hole_end: GuestPhys = .from(4 << 30);
+/// the 1GB slot of guest physical memory taken by the hole
+const hole_slot = mmio_hole_start.raw() >> 30;
+
+comptime {
+    // the RAM block <-> slot translation assumes the hole is exactly one 1GB slot
+    std.debug.assert(mmio_hole_end.raw() - mmio_hole_start.raw() == 1 << 30);
+}
+
+/// The 1GB slot of guest physical memory RAM block `i` is mapped at.
+pub fn blockSlot(i: usize) usize {
+    return if (i < hole_slot) i else i + 1;
+}
+
+/// The RAM block holding guest physical `addr`, null if `addr` isn't RAM.
+fn blockOf(guest_state: *vmx.VMState, addr: u64) ?usize {
+    const slot = addr >> 30;
+    if (slot == hole_slot) return null;
+    const i = if (slot < hole_slot) slot else slot - 1;
+    return if (i < guest_state.guest_mem_pages.len) i else null;
+}
+
+/// Whether all of guest physical `addr`..`addr + len` is RAM.
+fn isRam(guest_state: *vmx.VMState, addr: u64, len: usize) bool {
+    if (len == 0) return true;
+    for (addr >> 30..((addr + len - 1) >> 30) + 1) |slot| {
+        if (blockOf(guest_state, slot << 30) == null) return false;
+    }
+    return true;
+}
+
 /// creates a basic page table and populates `guest_cr3` and `guest_pml4` fields of guest_state
 /// assumes guest_state is a hhdm mapped ptr
 pub fn init(guest_state: *vmx.VMState, guest_allocator: *GuestAllocator, block_count: usize) !EPTP {
@@ -380,7 +413,7 @@ pub fn init(guest_state: *vmx.VMState, guest_allocator: *GuestAllocator, block_c
         // out of guest memory handled at the top of the scope.
         const page_phys = guest_allocator.alloc(1) catch unreachable;
         const page: HugePagePtr = hhdm.virtOf(HugePagePtr, page_phys);
-        pdpt.*[0] = .makeEntry(.@"1 GB", page_phys);
+        pdpt.*[blockSlot(0)] = .makeEntry(.@"1 GB", page_phys);
 
         guest_state.guest_mem_pages[0] = page;
         break :blk page;
@@ -398,7 +431,7 @@ pub fn init(guest_state: *vmx.VMState, guest_allocator: *GuestAllocator, block_c
         // old RAM data.
 
         guest_state.guest_mem_pages[i] = page;
-        pdpt.*[i] = .makeEntry(.@"1 GB", page_phys);
+        pdpt.*[blockSlot(i)] = .makeEntry(.@"1 GB", page_phys);
     }
 
     initGuestPageTables(first_block, block_count);
@@ -415,11 +448,10 @@ pub fn init(guest_state: *vmx.VMState, guest_allocator: *GuestAllocator, block_c
 
 /// translates a guest-physical address to a pointer into the guest's RAM.
 pub fn guestPhysToHostVirt(guest_state: *vmx.VMState, guest_phys: GuestPhys, must_4k_align: bool) !*u8 {
-    const huge_page_idx: usize = @divFloor(guest_phys.raw(), (1 << 30));
     const inner_offset: usize = @rem(guest_phys.raw(), (1 << 30));
     if (must_4k_align and inner_offset & ((1 << 12) - 1) != 0)
         return error.Non4KAlignedPageTableEntry;
-    if (huge_page_idx >= guest_state.guest_mem_pages.len)
+    const huge_page_idx = blockOf(guest_state, guest_phys.raw()) orelse
         return error.OOBRamAddr;
 
     const page_ptr = guest_state.guest_mem_pages[huge_page_idx];
@@ -518,7 +550,7 @@ fn readGuest(comptime T: type, guest_state: *vmx.VMState, base_addr: u64, cr3_if
 /// `base_addr` range is [0, total_mem_available]
 pub fn writeGuest(guest_state: *vmx.VMState, image: []const u8, guest_base: GuestPhys) error{OutOfMemory}!void {
     const base_addr = guest_base.raw();
-    if ((base_addr + image.len) >> 30 > guest_state.guest_mem_pages.len)
+    if (!isRam(guest_state, base_addr, image.len))
         return error.OutOfMemory;
 
     var done: usize = 0;
@@ -526,7 +558,7 @@ pub fn writeGuest(guest_state: *vmx.VMState, image: []const u8, guest_base: Gues
         const addr = base_addr +% done;
         const addr_in_page = addr & ((1 << 30) - 1);
         const n = @min(image.len - done, (1 << 30) - addr_in_page);
-        const page_idx = (addr - addr_in_page) >> 30;
+        const page_idx = blockOf(guest_state, addr).?;
         @memcpy(guest_state.guest_mem_pages[page_idx].*[addr_in_page .. addr_in_page + n], image[done .. done + n]);
         done += n;
     }
@@ -536,12 +568,14 @@ pub fn writeGuest(guest_state: *vmx.VMState, image: []const u8, guest_base: Gues
 /// `base_addr` range is [0, total_mem_available]
 pub fn memsetGuest(guest_state: *vmx.VMState, value: u8, guest_base: GuestPhys, len: usize) !void {
     const base_addr = guest_base.raw();
+    if (!isRam(guest_state, base_addr, len))
+        return error.OutOfMemory;
     var done: usize = 0;
     while (done < len) {
         const addr = base_addr +% done;
         const addr_in_page = addr & ((1 << 30) - 1);
         const n = @min(len - done, (1 << 30) - addr_in_page);
-        const page_idx = (addr - addr_in_page) >> 30;
+        const page_idx = blockOf(guest_state, addr).?;
         @memset(guest_state.guest_mem_pages[page_idx].*[addr_in_page .. addr_in_page + n], value);
         done += n;
     }
@@ -566,9 +600,9 @@ fn initGuestPageTables(first_block: *align(0x1000) [GuestAllocator.block_size]u8
         .xd = 0,
     };
 
-    // identity-map guest-physical 0 .. block_count GB.
-    // the 1GB entry stores addr >> 30, so block i is simply i.
-    for (0..block_count) |i|
+    // identity-map guest-physical 0 up to the end of RAM, the MMIO hole included.
+    // the 1GB entry stores addr >> 30, so slot i is simply i.
+    for (0..blockSlot(block_count - 1) + 1) |i|
         pdpt.*[i] = .{ .@"1 GB" = .{
             .p = 1,
             .r_w = 1,
