@@ -32,6 +32,36 @@ Features implemented as of 2026-09-29:
 
 On the left is the guest's serial console: the Linux kernel boots and drops into a root shell on a Buildroot initramfs.
 
+## Memory Managment
+
+### Host Allocations
+
+<details>
+  <summary>[Click to show]</summary>
+
+There are three distinct allocators, stacked on top of each other:
+
+| Allocator | Manages | Granularity | Used for |
+|---|---|---|---|
+| `fla` (free list allocator, first-fit) | the first 1GB of physical RAM | bytes | Anything variable sized |
+| page pool (bitmap allocator) | many pages carved out of `fla` at init | 4KB | VMXON region, VMCS, MSR bitmaps, EPT PML4/PDPTs, etc (4kb aligned blocks) |
+| `GuestAllocator` (bitmap) | all of physical RAM | 1GB | Guest RAM |
+
+A few decisions worth knowing:
+- **The page pool is separate from `fla` on purpose.** `fla` puts a header before every allocation, and a 4KB-aligned request out of it would fragment the heap.
+- **Guest RAM is not zeroed on allocation.** Zeroing 1GB blocks is expensive; this would
+
+</details>
+
+### Guest Memory Layout
+
+<details>
+  <summary>[Click to show]</summary>
+
+![Guest physical memory layout](./docs/guest_memory_layout.png)
+
+</details>
+
 ## Building
 
 **THIS PROJECT CURRENTLY WILL ONLY WORK ON INTEL-BASED CPUS AND WAS TESTED ONLY UNDER A LINUX HOST IN QEMU**
