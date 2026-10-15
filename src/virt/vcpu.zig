@@ -9,6 +9,7 @@ const ept = @import("ept.zig");
 const io = @import("io.zig");
 const simulate = @import("simulate.zig");
 const pic_hw = @import("../arch/x86_64/pic.zig");
+const lapic = @import("smp/lapic.zig");
 const rdmsr = msr.rdmsr;
 const vmread = vmx.vmread;
 const vmwrite = vmx.vmwrite;
@@ -34,6 +35,8 @@ pub const Vcpu = struct {
         /// locked with nothing enabled: VMX is hidden from the guest, so VMXON stays disabled
         feature_control: u64 = 1,
     },
+
+    virt_lapic: [1024]u32 = @splat(0),
 
     serial: io.Serial,
     pic: io.Pic,
@@ -100,6 +103,18 @@ pub const Vcpu = struct {
         self.serial = .{};
         self.pic = .init;
         self.pending_irq = 0;
+        self.virt_lapic = @splat(0);
+        {
+            // set ID in lapic
+            self.virt_lapic[0x20 / 4] = @as(u32, @truncate(index)) << 24;
+            // set VERSION in lapic
+            self.virt_lapic[0x30 / 4] = 0x0005_0014; // version 0x14, maximum LVT index 5
+            self.virt_lapic[0xE0 / 4] = 0xFFFF_FFFF;
+            self.virt_lapic[0xF0 / 4] = 0x0000_00FF;
+            // 0x2F0 CMCI, 0x320 timer, 0x330 thermal, 0x340 perfmon, 0x350 LINT0, 0x360 LINT1, 0x370 error
+            for (&[_]u32{ 0x2F0, 0x320, 0x330, 0x340, 0x350, 0x360, 0x370 }) |lvt|
+                self.virt_lapic[@divFloor(lvt, 4)] = 0x0001_0000;
+        }
 
         self.vmm_stack = try mem_allocator.kalloc.allocPages(1);
         @memset(self.vmm_stack, 0);
@@ -304,6 +319,17 @@ pub const Vcpu = struct {
             .vmxon,
             .vmlaunch,
             => {},
+
+            .ept_violation => {
+                const violating_addr: ept.GuestPhys = .from(vmread(.GUEST_PHYSICAL_ADDRESS));
+                switch (violating_addr.raw()) {
+                    0xfee00000...0xfee00fff => try lapic.eptViolation(self, violating_addr),
+                    else => try self.abort(),
+                }
+
+                // The CPU doesn't fill VM_EXIT_INSTRUCTION_LEN for EPT violations
+                return .resume_at_rip;
+            },
 
             .msr_read, .msr_write => if (msr.isAbsent(@enumFromInt(self.regs.ecx().*)))
                 return self.injectGp()

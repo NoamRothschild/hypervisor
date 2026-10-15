@@ -4,12 +4,12 @@
 //! source: http://www.intel.com/design/pentium/datashts/24201606.pdf
 //! ported from firecracker's `src/vmm/src/arch/x86_64/mptable.rs`
 const std = @import("std");
-const vmx = @import("vmx.zig");
-const ept = @import("ept.zig");
-const address = @import("../mem/address.zig");
+const vmx = @import("../vmx.zig");
+const ept = @import("../ept.zig");
+const address = @import("../../mem/address.zig");
 const assert = std.debug.assert;
 
-const hypervisor_sig = @import("cpuid.zig").hypervisor_sig;
+const hypervisor_sig = @import("../cpuid.zig").hypervisor_sig;
 
 /// A guest physical address, as the MP tables store them.
 pub const GuestPhys32 = address.Address(.guest_phys, .{ .backing = u32 });
