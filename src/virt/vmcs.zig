@@ -96,7 +96,16 @@ pub fn setup(vcpu: *Vcpu, kalloc: *KAlloc, eptp: ept.EPTP) !void {
 
     vmwrite(.PIN_BASED_VM_EXEC_CONTROL, try adjustControls(PinBasedVmExecutionControl, .IA32_VMX_PINBASED_CTLS, &.{
         .required(.PIN_BASED_EXT_INTR_EXITING, error.ExternalInterruptsExitUnsupported),
+        // exits when the guest's LAPIC timer is due, see `Vcpu.prepareEntry`
+        .required(.PIN_BASED_VMX_PREEMPTION_TIMER, error.PreemptionTimerUnsupported),
     }));
+    // reloaded before every entry, nothing is due before the guest programs its LAPIC timer
+    vmwrite(.VMX_PREEMPTION_TIMER_VALUE, std.math.maxInt(u32));
+
+    // a guest `hlt` is resumed in the HLT activity state, see the `.hlt` exit handler
+    const vmx_misc_activity_hlt = 1 << 6;
+    if (rdmsr(.IA32_VMX_MISC) & vmx_misc_activity_hlt == 0)
+        return error.HltActivityStateUnsupported;
 
     vmwrite(.VM_EXIT_CONTROLS, try adjustControls(VmExitControl, .IA32_VMX_EXIT_CTLS, &.{
         .optional(.VM_EXIT_IA32E_MODE),

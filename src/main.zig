@@ -11,6 +11,7 @@ const mem_allocator = @import("mem/allocator.zig");
 const GuestAllocator = @import("mem/guest_allocator.zig");
 const kalloc = &mem_allocator.kalloc;
 const linux = @import("virt/guest_os/linux.zig");
+const tsc = @import("arch/x86_64/tsc.zig");
 
 comptime {
     _ = @import("arch/x86_64/entry.zig");
@@ -78,6 +79,9 @@ pub fn kmain() !void {
 
     debug.printf("vendor: {s}\n", .{debug.getVendor()});
     debug.printf("features: {}\n", .{debug.getFeatures()});
+
+    tsc.calibrate();
+    std.log.info("TSC runs at {d} kHz\n", .{tsc.hz / 1000});
     if (!vmx.supportsVirtualization()) {
         std.log.err("proccessor does not support VT-x virtualization.\n", .{});
         trap();

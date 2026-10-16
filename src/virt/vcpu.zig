@@ -13,6 +13,7 @@ const lapic = @import("smp/lapic.zig");
 const rdmsr = msr.rdmsr;
 const vmread = vmx.vmread;
 const vmwrite = vmx.vmwrite;
+const tsc = @import("../arch/x86_64/tsc.zig");
 
 /// Everything that belongs to a single logical core of the guest. State shared
 /// by all cores lives in `vmx.VMState`.
@@ -39,6 +40,10 @@ pub const Vcpu = struct {
     virt_lapic: [1024]u32 = @splat(0),
     /// TSC when the guest last wrote the APIC timer's initial count, see `lapic.timerCurrentCount`
     lapic_timer_start_tsc: u64,
+    /// TSC at which the APIC timer next fires, 0 when it doesn't. see `lapic.timerPoll`
+    lapic_timer_deadline_tsc: u64,
+    /// the VMX-preemption timer counts down once every 2^shift TSC cycles (IA32_VMX_MISC[4:0])
+    preemption_timer_shift: u5,
 
     serial: io.Serial,
     pic: io.Pic,
@@ -107,6 +112,8 @@ pub const Vcpu = struct {
         self.pending_irq = 0;
         self.virt_lapic = @splat(0);
         self.lapic_timer_start_tsc = 0;
+        self.lapic_timer_deadline_tsc = 0;
+        self.preemption_timer_shift = @truncate(rdmsr(.IA32_VMX_MISC));
         {
             // set ID in lapic
             self.virt_lapic[0x20 / 4] = @as(u32, @truncate(index)) << 24;
@@ -366,11 +373,12 @@ pub const Vcpu = struct {
             .external_interrupt => {
                 // no ack-on-exit, so the IRQ is still pending in the PIC, and IF is 0 after
                 // any VM-exit. open a window for the host to take it: `pic.irqHandler` records
-                // it and sends the EOI, `injectExtIntr` picks it up.
+                // it and sends the EOI, `prepareEntry` picks it up.
                 asm volatile ("sti; nop; cli");
-                _ = self.injectExtIntr();
                 return .resume_at_rip;
             },
+            // nothing to do here, `prepareEntry` injects whatever is pending and re-arms both
+            .pending_virt_intr, .vmx_preemption_timer_expired => return .resume_at_rip,
             .hlt => {
                 if (vmread(.GUEST_RFLAGS) & rflags_if == 0) {
                     std.log.info("guest halted with interrupts disabled\n", .{});
@@ -378,9 +386,9 @@ pub const Vcpu = struct {
                 }
                 // the hlt is stepped over on resume, so an `sti; hlt` shadow ends with it
                 vmwrite(.GUEST_INTERRUPTIBILITY_INFO, 0);
-                // sleep until an IRQ the guest can take arrives
-                while (!self.injectExtIntr())
-                    asm volatile ("sti; hlt; cli");
+                // the guest sleeps in VMX non-root until something exits it: a host IRQ or
+                // the preemption timer. `prepareEntry` wakes it when it injects an interrupt.
+                vmwrite(.GUEST_ACTIVITY_STATE, @intFromEnum(ActivityState.hlt));
             },
             .triple_fault => {
                 std.log.err("guest triple faulted at rip 0x{x}; not resuming\n", .{vmread(.GUEST_RIP)});
@@ -398,36 +406,97 @@ pub const Vcpu = struct {
         return .@"resume";
     }
 
-    /// sets up the next VM-entry to deliver the lowest pending IRQ the guest can take
-    /// right now. returns whether one was injected.
-    /// the host already sent the EOI, so the guest's own EOIs are dropped (see `io.zig`).
-    fn injectExtIntr(self: *Vcpu) bool {
-        const pic = &self.pic;
-
+    /// Runs before every VM entry. Injects the highest pending interrupt if the guest
+    /// can take one now, otherwise asks for an exit as soon as it can (interrupt-window
+    /// exiting), and arms the preemption timer for the next LAPIC timer expiry.
+    fn prepareEntry(self: *Vcpu) void {
+        lapic.timerPoll(self);
         self.pending_irq |= pic_hw.takeReceived();
-        if (self.pending_irq == 0) return false;
+
+        // a handler or `reinjectInterruptedEvent` already injects something this entry
+        const entry_busy = vmread(.VM_ENTRY_INTR_INFO_FIELD) & entry_intr_valid != 0;
+        if (!entry_busy and canTakeInterrupt()) {
+            if (self.takePendingInterrupt()) |vector| {
+                const info: vmx.EntryIntrInfo = .{
+                    .vector = vector,
+                    .type = .external,
+                    .ec_available = false,
+                    .valid = true,
+                };
+                vmwrite(.VM_ENTRY_INTR_INFO_FIELD, @as(u32, @bitCast(info)));
+                // a halted guest wakes to take it
+                vmwrite(.GUEST_ACTIVITY_STATE, @intFromEnum(ActivityState.active));
+            }
+        }
+
+        // whatever is still pending goes in on the first entry the guest can take it
+        var ctls = vmread(.CPU_BASED_VM_EXEC_CONTROL);
+        const window: u64 = @intFromEnum(vmcs.VmExecutionControl.CPU_BASED_VIRTUAL_INTR_PENDING);
+        if (self.hasPendingInterrupt()) ctls |= window else ctls &= ~window;
+        vmwrite(.CPU_BASED_VM_EXEC_CONTROL, ctls);
+
+        const preemption_ticks: u64 = if (lapic.timerDeadline(self)) |deadline|
+            (deadline -| tsc.read()) >> self.preemption_timer_shift
+        else
+            std.math.maxInt(u32);
+        vmwrite(.VMX_PREEMPTION_TIMER_VALUE, @min(preemption_ticks, std.math.maxInt(u32)));
+    }
+
+    /// IF is set and there is no STI or MOV SS blocking, VM entry fails if an
+    /// interrupt is injected during either.
+    fn canTakeInterrupt() bool {
+        return vmread(.GUEST_RFLAGS) & rflags_if != 0 and
+            vmread(.GUEST_INTERRUPTIBILITY_INFO) & 0b11 == 0;
+    }
+
+    fn hasPendingInterrupt(self: *Vcpu) bool {
+        return lapic.pendingVector(self) != null or self.pendingPicIrq() != null;
+    }
+
+    /// marks the highest priority pending interrupt as delivered and returns its vector.
+    fn takePendingInterrupt(self: *Vcpu) ?u8 {
+        if (lapic.pendingVector(self)) |vector| {
+            lapic.acceptVector(self, vector);
+            return vector;
+        }
+        const irq = self.pendingPicIrq() orelse return null;
+        self.pending_irq &= ~(@as(u16, 1) << irq);
+        return if (irq < 8) self.pic.primary_base + irq else self.pic.secondary_base + (irq - 8);
+    }
+
+    /// the lowest unmasked IRQ waiting in the virtual PIC, if the guest set it up.
+    /// the host already sent the EOI, so the guest's own EOIs are dropped (see `io.zig`).
+    fn pendingPicIrq(self: *Vcpu) ?u4 {
+        const pic = &self.pic;
+        if (self.pending_irq == 0) return null;
         // no vector base from the guest yet
-        if (pic.primary_phase != .initialized) return false;
-        if (vmread(.GUEST_RFLAGS) & rflags_if == 0) return false;
-        // blocking by STI or MOV SS, VM-entry fails if an interrupt is injected during either
-        if (vmread(.GUEST_INTERRUPTIBILITY_INFO) & 0b11 != 0) return false;
+        if (pic.primary_phase != .initialized) return null;
+        // the PIC's output reaches the cpu through LINT0
+        if (!lapic.acceptsExtInt(self)) return null;
 
         const secondary_masked = pic.primary_mask & (1 << pic_hw.cascade_irq) != 0;
         const masked: u16 = @as(u16, if (secondary_masked) 0xff else pic.secondary_mask) << 8 | pic.primary_mask;
         const injectable = self.pending_irq & ~masked;
-        if (injectable == 0) return false;
+        if (injectable == 0) return null;
+        return @intCast(@ctz(injectable));
+    }
 
-        const irq: u4 = @intCast(@ctz(injectable));
-        const vector: u8 = if (irq < 8) pic.primary_base + irq else pic.secondary_base + (irq - 8);
-        const info: vmx.EntryIntrInfo = .{
-            .vector = vector,
-            .type = .external,
-            .ec_available = false,
-            .valid = true,
-        };
+    /// An event the CPU was delivering to the guest when the VM-exit happened (an
+    /// injected interrupt whose delivery hit an EPT violation, say) never reached
+    /// the guest. Inject it again on the next entry, or it is lost.
+    fn reinjectInterruptedEvent() void {
+        var info: vmx.EntryIntrInfo = @bitCast(@as(u32, @truncate(vmread(.IDT_VECTORING_INFO_FIELD))));
+        if (!info.valid) return;
+        // bit 12 is undefined in IDT-vectoring info, and reserved in entry info
+        info.rsvd = 0;
         vmwrite(.VM_ENTRY_INTR_INFO_FIELD, @as(u32, @bitCast(info)));
-        self.pending_irq &= ~(@as(u16, 1) << irq);
-        return true;
+        if (info.ec_available)
+            vmwrite(.VM_ENTRY_EXCEPTION_ERROR_CODE, vmread(.IDT_VECTORING_ERROR_CODE));
+        switch (info.type) {
+            // `int n`, `int3`, `into` and `int1` restart after the instruction
+            .sw_interrupt, .priv_sw_exception, .sw_exception => vmwrite(.VM_ENTRY_INSTRUCTION_LEN, vmread(.VM_EXIT_INSTRUCTION_LEN)),
+            else => {},
+        }
     }
 
     /// makes the next VM-entry raise #GP(0) in the guest, as hardware does for an
@@ -596,6 +665,14 @@ pub fn vmExitHandler() callconv(.naked) void {
 }
 
 const rflags_if: u64 = 1 << 9;
+/// `VM_ENTRY_INTR_INFO_FIELD` holds an event to inject, cleared by every VM-exit
+const entry_intr_valid: u64 = 1 << 31;
+
+/// values of `GUEST_ACTIVITY_STATE`
+const ActivityState = enum(u64) {
+    active = 0,
+    hlt = 1,
+};
 
 /// What `vmExitHandler` does once `mainVmExitHandler` returns. values are matched in its asm.
 pub const ExitAction = enum(u8) {
@@ -624,6 +701,14 @@ export fn mainVmExitHandler(vcpu: *Vcpu, guest_regs: *Vcpu.Regs) callconv(.c) Ex
         .cr_access,
         .external_interrupt,
         .hlt,
+        .pending_virt_intr,
+        .vmx_preemption_timer_expired,
+        // every timer tick is an EOI write and often a count read: logging them makes each
+        // interrupt take longer than the timer period, and the guest never leaves its handler
+        .ept_violation,
+        // FS_BASE is written on every context switch between user processes
+        .msr_write,
+        .msr_read,
         => debug.logging_enabled = false,
         else => {},
     }
@@ -634,7 +719,8 @@ export fn mainVmExitHandler(vcpu: *Vcpu, guest_regs: *Vcpu.Regs) callconv(.c) Ex
         vmread(.GUEST_RIP),
     });
 
-    return vcpu.tryExitReason(exit_reason, exit_qual) catch |err| switch (err) {
+    Vcpu.reinjectInterruptedEvent();
+    const action = vcpu.tryExitReason(exit_reason, exit_qual) catch |err| switch (err) {
         error.Aborted => {
             std.log.err("vcpu {d} aborted at rip 0x{x} after {s} (0x{x}); not resuming\n", .{
                 vcpu.index,
@@ -645,6 +731,8 @@ export fn mainVmExitHandler(vcpu: *Vcpu, guest_regs: *Vcpu.Regs) callconv(.c) Ex
             return .exit;
         },
     };
+    if (action != .exit) vcpu.prepareEntry();
+    return action;
 }
 
 export fn resumeToNextInstruction() callconv(.c) void {

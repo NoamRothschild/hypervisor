@@ -1,6 +1,8 @@
 const std = @import("std");
 const debug = @import("../debug.zig");
 const Vcpu = @import("vcpu.zig").Vcpu;
+const lapic = @import("smp/lapic.zig");
+const tsc = @import("../arch/x86_64/tsc.zig");
 
 // TODO: move sig to a move visible place place,
 pub const hypervisor_sig = "NoamRTD HV\x00\x00";
@@ -18,10 +20,14 @@ pub const Leaf = enum(u32) {
     /// Processor extended state enumeration.
     /// Output depends on the ECX input value.
     ext_enumeration = 0xD,
+    /// TSC / core crystal clock ratio, and the crystal's frequency.
+    tsc_crystal = 0x15,
     /// Maximum input value for extended function CPUID information.
     ext_func = 0x80000000,
     /// EAX: Extended processor signature and feature bits.
     ext_proc_signature = 0x80000001,
+    /// Advanced power management, EDX bit 8 is the invariant TSC.
+    ext_power = 0x80000007,
     /// Hypervisor vendor signature, our own and never the host's.
     hypervisor = 0x40000000,
     /// Unimplemented
@@ -78,6 +84,7 @@ var features = debug.CpuFeatures{
     .vme = 1,
     .de = 1,
     .pse = 1,
+    .edx_tsc = 1,
     .msr = 1,
     .pae = 1,
     .cx8 = 1,
@@ -93,6 +100,7 @@ var features = debug.CpuFeatures{
 
 const ext_feature0_ebx = ExtFeatureEbx0{
     .fsgsbase = 0,
+    .tsc_adjust = 1,
     .smep = 1,
     .invpcid = 1,
     .smap = 1,
@@ -148,7 +156,7 @@ pub fn cpuid(vcpu: *Vcpu) error{Aborted}!void {
             guest_regs.edx().* = @truncate(@as(u64, @bitCast(features)) >> 32);
         },
         .ext_func => {
-            guest_regs.eax().* = 0x8000_0000 + 1; // maximum input value for extended function CPUID.
+            guest_regs.eax().* = 0x8000_0007; // maximum input value for extended function CPUID.
             guest_regs.ebx().* = 0; // reserved
             guest_regs.ecx().* = 0; // reserved
             guest_regs.edx().* = 0; // reserved
@@ -159,6 +167,12 @@ pub fn cpuid(vcpu: *Vcpu) error{Aborted}!void {
             guest_regs.ebx().* = 0; // reserved
             guest_regs.ecx().* = orig.ecx; // LAHF in 64-bit mode / LZCNT / PREFETCHW
             guest_regs.edx().* = orig.edx; // SYSCALL / XD / 1GB large page / RDTSCP and IA32_TSC_AUX / Intel64
+        },
+        .ext_power => {
+            invalid(vcpu);
+            // the TSC ticks at a constant rate and doesn't stop in deep C-states
+            const invariant_tsc = 1 << 8;
+            guest_regs.edx().* = invariant_tsc;
         },
         .hypervisor => {
             guest_regs.eax().* = 0x40000000; // maximum input value for hypervisor leaves.
@@ -187,9 +201,33 @@ pub fn cpuid(vcpu: *Vcpu) error{Aborted}!void {
                 else => try vcpu.abortMsg("Unhandled CPUID: Leaf=0x{X:0>8}, Sub=0x{X:0>8}\n", .{ guest_regs.rax, guest_regs.rcx }),
             }
         },
+        .tsc_crystal => {
+            // TSC = crystal * EBX / EAX. Linux takes this as the TSC frequency instead of
+            // measuring it, and the crystal as the LAPIC timer's input clock, which it
+            // then doesn't calibrate either. so the crystal is exactly the virtual LAPIC's clock.
+            if (tsc.hz == 0) return invalid(vcpu);
+            guest_regs.eax().* = 1;
+            guest_regs.ebx().* = lapic.tsc_per_bus_cycle;
+            guest_regs.ecx().* = @intCast(tsc.hz / lapic.tsc_per_bus_cycle);
+            guest_regs.edx().* = 0;
+        },
         _ => {
             if (leaf > 0x40000000 and leaf <= 0x4fffffff) {
                 // hypervisor leaves
+                invalid(vcpu);
+                return;
+            }
+            if (leaf >= 0x80000002 and leaf <= 0x80000004) {
+                // processor brand string, 16 bytes per leaf
+                const orig = rawCpuid(leaf, subleaf);
+                guest_regs.eax().* = orig.eax;
+                guest_regs.ebx().* = orig.ebx;
+                guest_regs.ecx().* = orig.ecx;
+                guest_regs.edx().* = orig.edx;
+                return;
+            }
+            if (leaf == 0x80000005 or leaf == 0x80000006) {
+                // reserved on Intel / L2 cache info, below `ext_power` so Linux reads them
                 invalid(vcpu);
                 return;
             }

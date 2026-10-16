@@ -30,11 +30,15 @@ pub inline fn wrmsr(msr_id: All, value: u64) void {
 pub fn isAbsent(id: All) bool {
     const AbsetValue = enum(u32) {
         AMD64_DE_CFG = 0xc0011029, // AMD only
+        IA32_PPERF = 0x0000064e,
+        SMI_COUNT = 0x00000034,
         _,
     };
     return switch (@as(AbsetValue, @enumFromInt(@intFromEnum(id)))) {
         // Linux probes it with rdmsr_safe even on Intel (LFENCE_RDTSC is set there too)
         .AMD64_DE_CFG => true,
+        // probed with rdmsr_safe by the perf "msr" PMU once the guest has a TSC
+        .IA32_PPERF, .SMI_COUNT => true,
         _ => false,
     };
 }

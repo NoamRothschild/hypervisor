@@ -17,6 +17,7 @@ pub fn handleIoIn(vcpu: *Vcpu, qual: IoQual) error{Aborted}!void {
         0x0020...0x0021 => try handlePicIn(vcpu, qual),
         0x0040...0x0047 => {}, // PIT ports, current set to passthrough
         0x0060...0x0064 => vcpu.regs.rax = 0, // PS/2, unimplemented
+        0x04D0...0x04D1 => vcpu.regs.rax = 0, // PIC ELCR, every IRQ edge-triggered
         0x0070...0x0071 => vcpu.regs.rax = 0, // RTC, unimplemented
         0x0080...0x008F => {}, // DMA, unimplemented
         0x00A0...0x00A1 => try handlePicIn(vcpu, qual),
@@ -133,6 +134,9 @@ fn handlePicIn(vcpu: *Vcpu, qual: IoQual) error{Aborted}!void {
     const pic = &vcpu.pic;
 
     switch (qual.port) {
+        // IRR or ISR, whichever OCW3 last picked. the host takes and EOIs every IRQ
+        // before the guest sees it, so nothing is ever requested or in service here
+        0x20, 0xA0 => vcpu.regs.rax = 0,
         // Primary PIC data
         0x21 => switch (pic.primary_phase) {
             .uninitialized, .initialized => vcpu.regs.rax = pic.primary_mask,
@@ -159,6 +163,8 @@ fn handlePicOut(vcpu: *Vcpu, qual: IoQual) error{Aborted}!void {
             // Specific-EOI
             // It's Ymir's responsibility to send EOI, so guests are not allowed to send EOI
             0x60...0x67 => {},
+            // OCW3, selects what reading this port returns, see `handlePicIn`
+            0x08...0x0f => {},
             else => try vcpu.abort(),
         },
         // Primary PIC data
@@ -183,6 +189,8 @@ fn handlePicOut(vcpu: *Vcpu, qual: IoQual) error{Aborted}!void {
             // Specific-EOI
             // It's Ymir's responsibility to send EOI, so guests are not allowed to send EOI
             0x60...0x67 => {},
+            // OCW3, selects what reading this port returns, see `handlePicIn`
+            0x08...0x0f => {},
             else => try vcpu.abort(),
         },
         // Secondary PIC data
