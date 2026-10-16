@@ -37,6 +37,8 @@ pub const Vcpu = struct {
     },
 
     virt_lapic: [1024]u32 = @splat(0),
+    /// TSC when the guest last wrote the APIC timer's initial count, see `lapic.timerCurrentCount`
+    lapic_timer_start_tsc: u64,
 
     serial: io.Serial,
     pic: io.Pic,
@@ -104,6 +106,7 @@ pub const Vcpu = struct {
         self.pic = .init;
         self.pending_irq = 0;
         self.virt_lapic = @splat(0);
+        self.lapic_timer_start_tsc = 0;
         {
             // set ID in lapic
             self.virt_lapic[0x20 / 4] = @as(u32, @truncate(index)) << 24;
@@ -620,6 +623,7 @@ export fn mainVmExitHandler(vcpu: *Vcpu, guest_regs: *Vcpu.Regs) callconv(.c) Ex
         .io_instruction,
         .cr_access,
         .external_interrupt,
+        .hlt,
         => debug.logging_enabled = false,
         else => {},
     }
@@ -632,7 +636,12 @@ export fn mainVmExitHandler(vcpu: *Vcpu, guest_regs: *Vcpu.Regs) callconv(.c) Ex
 
     return vcpu.tryExitReason(exit_reason, exit_qual) catch |err| switch (err) {
         error.Aborted => {
-            std.log.err("vcpu {d} aborted at rip 0x{x}; not resuming\n", .{ vcpu.index, vmread(.GUEST_RIP) });
+            std.log.err("vcpu {d} aborted at rip 0x{x} after {s} (0x{x}); not resuming\n", .{
+                vcpu.index,
+                vmread(.GUEST_RIP),
+                @tagName(exit_reason),
+                exit_qual.backing_int,
+            });
             return .exit;
         },
     };

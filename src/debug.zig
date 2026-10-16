@@ -68,6 +68,7 @@ pub const panic = std.debug.FullPanic(panicFn);
 
 fn panicFn(err: []const u8, ra: ?usize) noreturn {
     @branchHint(.cold);
+    logging_enabled = true;
     _ = ra;
 
     printf("PANIC!: {s}\n", .{err});
@@ -83,6 +84,13 @@ pub fn logFn(
     args: anytype,
 ) void {
     _ = scope;
+    const old_debug_enable = logging_enabled;
+    defer logging_enabled = old_debug_enable;
+    logging_enabled = switch (message_level) {
+        .warn, .err => true,
+        else => logging_enabled,
+    };
+
     const prefix = switch (message_level) {
         .debug => "[debug] ",
         .err => "[err] ",

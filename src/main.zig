@@ -92,7 +92,7 @@ pub fn kmain() !void {
         defer vmx.vmxoff();
         try guest_state.prepare(&guest_alloc, .{
             .ram_block_count = 5, // 5GB memory
-            .vcpu_count = 2,
+            .vcpu_count = 1,
         });
         try linux.load(guest_state);
 
