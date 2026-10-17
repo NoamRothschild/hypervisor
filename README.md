@@ -1,17 +1,18 @@
 # AWS's EC2 (WIP)
 
-Where I got up until now: A type 1 hypervisor for Intel VT-x, written from scratch in Zig, that boots Linux!
+Where I got up until now: A type 1 hypervisor for Intel VT-x, written from scratch in Zig, that boots Linux with multiple virtual CPUs!
 
-Features implemented as of 2026-09-29:
+Features implemented as of 2026-10-17:
 - Bare-metal x86-64 kernel:
     - GRUB as bootloader
-    - Higher-half kernel with 4-level paging
+    - [Higher-half kernel](https://wiki.osdev.org/Higher_Half_Kernel) with 4-level paging
     - HHDM (direct mapping of all physical memory)
-    - GDT, TSS, IDT, interrupts + IRQ handling (8259 PIC, PIT)
+    - GDT, TSS, IDT, interrupts + IRQ handling ([8259 PIC](https://wiki.osdev.org/8259_PIC), [PIT](https://wiki.osdev.org/Programmable_Interval_Timer))
     - Memory allocators: free-list heap, bitmap page allocator, 1GB guest-RAM allocator
+    - TSC frequency calibration against the PIT
 - Intel VT-x virtualization:
-    - VMXON / VMCS setup / VMLAUNCH and a VM-exit handling loop
-    - EPT (Extended Page Tables)
+    - [VMXON / VMCS](https://wiki.osdev.org/VMX) setup, and a run loop
+    - [EPT](https://en.wikipedia.org/wiki/Second_Level_Address_Translation#Extended_Page_Tables) (Extended Page Tables), with a MMIO hole
     - Reading and writing guest memory, including walking the guest's page tables
     - CPUID virtualization
     - MSR virtualization
@@ -19,12 +20,26 @@ Features implemented as of 2026-09-29:
     - I/O port virtualization:
         - Virtual 8259 PIC
         - Virtual serial port (COM1)
-    - Hardware IRQ injection into guest
-    - `hlt` emulation (sleep until a guest interrupts arrive)
+    - MMIO emulation: EPT violations decoded with a small x86 `mov` instruction decoder
+    - Interrupt delivery:
+        - Hardware IRQ injection into guest
+        - Interrupt-window exiting: a pending interrupt goes in as soon as guest can take it
+    - `hlt` emulation (the guest core sleeps until an interrupt arrives)
+- [Local APIC](https://wiki.osdev.org/APIC) virtualization:
+    - LAPIC registers, IRR/ISR, EOI
+    - The 8259 PIC routed through LINT0
+    - LAPIC timer, delivered with the VMX-preemption timer
+    - The TSC as the guest's clocksource
+- **SMP:** Multiple CPUs in the guest
+    - Several vCPUs time-share one physical core: a round-robin scheduler with 1ms slices, ended by the VMX-preemption timer
+    - Each vCPU has its own VMCS, LAPIC, registers, and more!
+    - IPIs: INIT and SIPI
+    - full emulation of [INIT-SIPI-SIPI](https://wiki.osdev.org/Symmetric_Multiprocessing#BSP_Initialization_Code) from hardware side, for AP core bring up
 - Linux guest:
-    - Linux x86 boot protocol (32-bit entry)
-    - initramfs loading
-    - Boots an unmodified Linux kernel all the way to a userspace shell
+    - [Linux x86 boot protocol](https://docs.kernel.org/arch/x86/boot.html) (32-bit entry)
+    - [initramfs](https://docs.kernel.org/filesystems/ramfs-rootfs-initramfs.html) loading
+    - An [MP table](https://wiki.osdev.org/MP_Specification) describing the guest's CPUs (no ACPI)
+    - Boots an unmodified Linux kernel all the way to a userspace shell, tested with 1 to 8 CPUs
 
 ## Demo
 #### Linux booting inside the hypervisor, running under QEMU:
