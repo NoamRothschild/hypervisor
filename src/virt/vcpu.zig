@@ -6,14 +6,12 @@ const msr = @import("msr.zig");
 const vmx = @import("vmx.zig");
 const vmcs = @import("vmcs.zig");
 const ept = @import("ept.zig");
-const io = @import("io.zig");
 const simulate = @import("simulate.zig");
 const pic_hw = @import("../arch/x86_64/pic.zig");
 const lapic = @import("smp/lapic.zig");
 const rdmsr = msr.rdmsr;
 const vmread = vmx.vmread;
 const vmwrite = vmx.vmwrite;
-const tsc = @import("../arch/x86_64/tsc.zig");
 
 /// Everything that belongs to a single logical core of the guest. State shared
 /// by all cores lives in `vmx.VMState`.
@@ -22,11 +20,11 @@ pub const Vcpu = struct {
     vm: *vmx.VMState,
     /// position in `vm.cpus`
     index: usize,
-    vmxon_region: ept.HostPhys,
+    /// whether the scheduler (`Pcpu.run`) may enter the vcpu
+    state: State,
     vmcs_region: ept.HostPhys,
-    /// virt addr, stack for vmm in VM-Exit state. The top `stack_reserved` bytes
-    /// hold the `*Vcpu` that `vmExitHandler` reads to find its vcpu.
-    vmm_stack: []align(4096) u8,
+    /// whether the VMCS was launched, the next entry is a `vmresume` then
+    launched: bool,
 
     host_msr: msr.MsrArea,
     guest_msr: msr.MsrArea,
@@ -42,26 +40,22 @@ pub const Vcpu = struct {
     lapic_timer_start_tsc: u64,
     /// TSC at which the APIC timer next fires, 0 when it doesn't. see `lapic.timerPoll`
     lapic_timer_deadline_tsc: u64,
-    /// the VMX-preemption timer counts down once every 2^shift TSC cycles (IA32_VMX_MISC[4:0])
-    preemption_timer_shift: u5,
 
-    serial: io.Serial,
-    pic: io.Pic,
-    /// host IRQs not yet injected into the guest, bit n is IRQ n. filled from `pic.takeReceived`.
-    pending_irq: u16,
+    /// guest state to (re)start from, written into the VMCS by the next `prepareEntry`.
+    /// set by `start`.
+    pending_start: ?vmcs.GuestStart,
 
-    /// the guest's general purpose registers.
-    /// while handling a VM-exit this points at the frame `vmExitHandler` pushed.
-    regs: *Regs,
+    /// the guest's general purpose registers, except RSP which lives in the VMCS.
+    /// `__vmEnter` loads them into the cpu, `__vmExit` stores them back.
+    regs: Regs,
 
-    /// where `__vmlaunch` was called from, `__vmReturnSucceed` returns there.
-    old_rsp: u64,
-    old_rbp: u64,
-
-    /// top of the vmm stack that is reserved for the `*Vcpu` slot
-    const stack_reserved = 16;
-    /// pushes done by `vmExitHandler`, the distance from its frame to the `*Vcpu` slot
-    const exit_frame_size = @sizeOf(Regs);
+    pub const State = enum {
+        /// entered whenever the scheduler picks it. a halted guest sleeps inside
+        /// VMX non-root (the HLT activity state), so it is still runnable
+        runnable,
+        /// not started yet (`start`), or stopped for good: aborted, faulted or shut down
+        stopped,
+    };
 
     pub const Regs = extern struct {
         r15: u64,
@@ -104,16 +98,14 @@ pub const Vcpu = struct {
     pub fn init(self: *Vcpu, vm: *vmx.VMState, index: usize) !void {
         self.vm = vm;
         self.index = index;
-        self.old_rsp = 0;
-        self.old_rbp = 0;
+        self.state = .stopped;
+        self.launched = false;
+        self.regs = std.mem.zeroes(Regs);
         self.shadow_msrs = .{};
-        self.serial = .{};
-        self.pic = .init;
-        self.pending_irq = 0;
+        self.pending_start = null;
         self.virt_lapic = @splat(0);
         self.lapic_timer_start_tsc = 0;
         self.lapic_timer_deadline_tsc = 0;
-        self.preemption_timer_shift = @truncate(rdmsr(.IA32_VMX_MISC));
         {
             // set ID in lapic
             self.virt_lapic[0x20 / 4] = @as(u32, @truncate(index)) << 24;
@@ -126,35 +118,16 @@ pub const Vcpu = struct {
                 self.virt_lapic[@divFloor(lvt, 4)] = 0x0001_0000;
         }
 
-        self.vmm_stack = try mem_allocator.kalloc.allocPages(1);
-        @memset(self.vmm_stack, 0);
-        const slot: **Vcpu = @ptrCast(@alignCast(self.vmm_stack.ptr + self.vmm_stack.len - stack_reserved));
-        slot.* = self;
-
-        try self.allocVmxonRegion();
         try self.allocVmcsRegion();
     }
 
-    /// value for the VMCS `HOST_RSP` field.
-    /// points at the `*Vcpu` slot, so the first push of `vmExitHandler` lands below it.
-    pub fn hostRsp(self: *const Vcpu) u64 {
-        return @intFromPtr(self.vmm_stack.ptr) + self.vmm_stack.len - stack_reserved;
+    /// makes the vcpu runnable, starting from `start_state` on its next entry
+    pub fn start(self: *Vcpu, start_state: vmcs.GuestStart) void {
+        self.pending_start = start_state;
+        self.state = .runnable;
     }
 
-    /// Prepares the VMXON region. `vmxon()` executes it.
-    fn allocVmxonRegion(self: *Vcpu) !void {
-        const vmxon_page = try mem_allocator.kalloc.allocPage();
-        const vmxon_region_phys = hhdm.physOf(vmxon_page);
-
-        std.log.info("virtual buff addr for VMXON at 0x{x}\n", .{@intFromPtr(vmxon_page)});
-        std.log.info("physical buff addr for VMXON at 0x{x}\n", .{vmxon_region_phys.raw()});
-
-        @memset(vmxon_page, 0);
-        @as(*volatile u32, @ptrCast(vmxon_page)).* = revisionIdentifier();
-        self.vmxon_region = vmxon_region_phys;
-    }
-
-    /// Prepares the VMCS region. `vmclear()` and `vmptrld()` activate it, after `vmxon()`.
+    /// Prepares the VMCS region. `vmclear()` and `vmptrld()` activate it, after `Pcpu.init`.
     fn allocVmcsRegion(self: *Vcpu) !void {
         const vmcs_page = try mem_allocator.kalloc.allocPage();
         const vmcs_region_phys = hhdm.physOf(vmcs_page);
@@ -163,40 +136,9 @@ pub const Vcpu = struct {
         std.log.info("physical buff addr for VMCS at 0x{x}\n", .{vmcs_region_phys.raw()});
 
         @memset(vmcs_page, 0);
-        @as(*volatile u32, @ptrCast(vmcs_page)).* = revisionIdentifier();
+        @as(*volatile u32, @ptrCast(vmcs_page)).* = vmx.revisionIdentifier();
 
         self.vmcs_region = vmcs_region_phys;
-    }
-
-    fn revisionIdentifier() u32 {
-        const revision_identifier: u32 = @truncate(rdmsr(.IA32_VMX_BASIC));
-        std.log.info("IA32_VMX_BASIC revision identifier: 0x{x}\n", .{revision_identifier});
-        return revision_identifier;
-    }
-
-    /// executes VMXON with this vcpu's region, entering VMX operation on the current core.
-    pub fn vmxon(self: *Vcpu) !void {
-        // carry flag result
-        var failed: u8 = undefined;
-        // zero flag result
-        var valid_fail: u8 = undefined;
-
-        asm volatile (
-            \\ vmxon (%[vmxon_phys_ptr])
-            \\ setc %[failed]
-            \\ setz %[valid_fail]
-            : [failed] "=qm" (failed),
-              [valid_fail] "=qm" (valid_fail),
-            : [vmxon_phys_ptr] "r" (&self.vmxon_region),
-        );
-
-        if (failed != 0)
-            return error.vmxon_failed_cf;
-
-        if (valid_fail != 0) {
-            debug.printf("vmxon failed with {d}\n", .{vmx.vmerr()});
-            return error.vmxon_failed_with_code;
-        }
     }
 
     /// FIXME: I didn't test it acutally works.
@@ -304,7 +246,7 @@ pub const Vcpu = struct {
 
     /// The guest did something that can't be continued from: it faulted, or it tried
     /// something the hypervisor doesn't support (yet). Not for hypervisor bugs, those panic.
-    /// Handlers propagate this up to `mainVmExitHandler`, which stops the vcpu.
+    /// Handlers propagate this up to `handleExit`, which stops the vcpu.
     pub fn abort(_: *Vcpu) error{Aborted}!void {
         return error.Aborted;
     }
@@ -406,12 +348,19 @@ pub const Vcpu = struct {
         return .@"resume";
     }
 
-    /// Runs before every VM entry. Injects the highest pending interrupt if the guest
-    /// can take one now, otherwise asks for an exit as soon as it can (interrupt-window
-    /// exiting), and arms the preemption timer for the next LAPIC timer expiry.
-    fn prepareEntry(self: *Vcpu) void {
+    /// Runs before every VM entry, with the VMCS current. Applies a pending start state,
+    /// injects the highest pending interrupt if the guest can take one now, otherwise
+    /// asks for an exit as soon as it can (interrupt-window exiting).
+    /// the preemption timer is armed by `Pcpu.run`, it knows the other vcpus' timers too.
+    pub fn prepareEntry(self: *Vcpu) void {
+        if (self.pending_start) |start_state| {
+            vmcs.setGuestStart(start_state);
+            self.pending_start = null;
+        }
+        if (!self.launched) self.updateMsrs();
+
         lapic.timerPoll(self);
-        self.pending_irq |= pic_hw.takeReceived();
+        self.vm.pending_irq |= pic_hw.takeReceived();
 
         // a handler or `reinjectInterruptedEvent` already injects something this entry
         const entry_busy = vmread(.VM_ENTRY_INTR_INFO_FIELD) & entry_intr_valid != 0;
@@ -434,12 +383,6 @@ pub const Vcpu = struct {
         const window: u64 = @intFromEnum(vmcs.VmExecutionControl.CPU_BASED_VIRTUAL_INTR_PENDING);
         if (self.hasPendingInterrupt()) ctls |= window else ctls &= ~window;
         vmwrite(.CPU_BASED_VM_EXEC_CONTROL, ctls);
-
-        const preemption_ticks: u64 = if (lapic.timerDeadline(self)) |deadline|
-            (deadline -| tsc.read()) >> self.preemption_timer_shift
-        else
-            std.math.maxInt(u32);
-        vmwrite(.VMX_PREEMPTION_TIMER_VALUE, @min(preemption_ticks, std.math.maxInt(u32)));
     }
 
     /// IF is set and there is no STI or MOV SS blocking, VM entry fails if an
@@ -460,15 +403,18 @@ pub const Vcpu = struct {
             return vector;
         }
         const irq = self.pendingPicIrq() orelse return null;
-        self.pending_irq &= ~(@as(u16, 1) << irq);
-        return if (irq < 8) self.pic.primary_base + irq else self.pic.secondary_base + (irq - 8);
+        const pic = &self.vm.pic;
+        self.vm.pending_irq &= ~(@as(u16, 1) << irq);
+        return if (irq < 8) pic.primary_base + irq else pic.secondary_base + (irq - 8);
     }
 
     /// the lowest unmasked IRQ waiting in the virtual PIC, if the guest set it up.
     /// the host already sent the EOI, so the guest's own EOIs are dropped (see `io.zig`).
     fn pendingPicIrq(self: *Vcpu) ?u4 {
-        const pic = &self.pic;
-        if (self.pending_irq == 0) return null;
+        const pic = &self.vm.pic;
+        // the PIC's INTR line is wired to the BSP's LINT0 only, as a BIOS leaves it
+        if (self.index != 0) return null;
+        if (self.vm.pending_irq == 0) return null;
         // no vector base from the guest yet
         if (pic.primary_phase != .initialized) return null;
         // the PIC's output reaches the cpu through LINT0
@@ -476,7 +422,7 @@ pub const Vcpu = struct {
 
         const secondary_masked = pic.primary_mask & (1 << pic_hw.cascade_irq) != 0;
         const masked: u16 = @as(u16, if (secondary_masked) 0xff else pic.secondary_mask) << 8 | pic.primary_mask;
-        const injectable = self.pending_irq & ~masked;
+        const injectable = self.vm.pending_irq & ~masked;
         if (injectable == 0) return null;
         return @intCast(@ctz(injectable));
     }
@@ -513,22 +459,15 @@ pub const Vcpu = struct {
         return .resume_at_rip;
     }
 
-    /// calls vmlaunch.
-    /// ret val indicates success of operation
-    ///
-    /// returns either if vmlaunch failed
-    /// or when after the VM caused an exit (will block)
-    pub fn vmlaunch(self: *Vcpu, guest_regs: *Regs) bool {
-        self.regs = guest_regs;
-        self.updateMsrs();
-        // IRQs from before the guest existed aren't its to receive
-        _ = pic_hw.takeReceived();
-
-        const ret = asm volatile ("call __vmlaunch"
+    /// Enters the guest with `vmlaunch` or `vmresume`, and returns at its next VM-exit
+    /// with `regs` holding its registers. false if the VM entry itself failed.
+    /// the VMCS must be current (`Pcpu.load`) and prepared (`prepareEntry`).
+    pub fn enter(self: *Vcpu) bool {
+        const ret = asm volatile ("call __vmEnter"
             : [ret] "={al}" (-> u8),
-            : [regs] "{rdi}" (guest_regs),
-              [vcpu] "{rsi}" (self),
+            : [vcpu] "{rdi}" (self),
             : .{
+              .rax = true,
               .rcx = true,
               .rdx = true,
               .rsi = true,
@@ -538,130 +477,163 @@ pub const Vcpu = struct {
               .r10 = true,
               .r11 = true,
               .memory = true,
+              .cc = true,
             });
-        return ret != 0;
+        if (ret == 0) {
+            std.log.err("{s} failed with error code: {d}\n", .{
+                if (self.launched) "vmresume" else "vmlaunch",
+                vmx.vmerr(),
+            });
+            return false;
+        }
+        self.launched = true;
+        return true;
+    }
+
+    /// Handles the VM-exit that just happened, so the next entry resumes the guest
+    /// where it should. Stops the vcpu if the guest can't continue.
+    pub fn handleExit(self: *Vcpu) void {
+        switch (self.exitAction()) {
+            .exit => self.state = .stopped,
+            .@"resume" => resumeToNextInstruction(),
+            .resume_at_rip => {},
+        }
+    }
+
+    /// Decides what to do about the VM-exit that just happened, see `ExitAction`.
+    fn exitAction(self: *Vcpu) ExitAction {
+        const exit_reason: vmx.ExitReason = @enumFromInt(vmread(.VM_EXIT_REASON) & 0xffff);
+        const exit_qual: vmx.ExitQualification = .{
+            .backing_int = vmread(.EXIT_QUALIFICATION),
+        };
+
+        const old_debug_enable = debug.logging_enabled;
+        defer debug.logging_enabled = old_debug_enable;
+        switch (exit_reason) {
+            .io_instruction,
+            .cr_access,
+            .external_interrupt,
+            .hlt,
+            .pending_virt_intr,
+            .vmx_preemption_timer_expired,
+            // every timer tick is an EOI write and often a count read: logging them makes each
+            // interrupt take longer than the timer period, and the guest never leaves its handler
+            .ept_violation,
+            // FS_BASE is written on every context switch between user processes
+            .msr_write,
+            .msr_read,
+            => debug.logging_enabled = false,
+            else => {},
+        }
+
+        std.log.info("vm exit! info: .{{ .reason = {s}, .qual = 0x{x}, .addr = 0x{x} }}\n", .{
+            @tagName(exit_reason),
+            exit_qual.backing_int,
+            vmread(.GUEST_RIP),
+        });
+
+        reinjectInterruptedEvent();
+        return self.tryExitReason(exit_reason, exit_qual) catch |err| switch (err) {
+            error.Aborted => {
+                std.log.err("vcpu {d} aborted at rip 0x{x} after {s} (0x{x}); not resuming\n", .{
+                    self.index,
+                    vmread(.GUEST_RIP),
+                    @tagName(exit_reason),
+                    exit_qual.backing_int,
+                });
+                return .exit;
+            },
+        };
     }
 };
 
-/// `rdi` points at the `Regs` the guest should start with, `rsi` at its `Vcpu`
-export fn __vmlaunch() callconv(.naked) void {
+/// The registers `__vmEnter` and `__vmExit` move between the cpu and `Vcpu.regs`,
+/// all but `rdi`, which holds the `*Vcpu` and is moved last.
+fn regMoves(comptime dir: enum { to_cpu, from_cpu }) []const u8 {
+    comptime {
+        var code: []const u8 = "";
+        for (@typeInfo(Vcpu.Regs).@"struct".fields) |field| {
+            if (std.mem.eql(u8, field.name, "rdi")) continue;
+            const offset = @offsetOf(Vcpu, "regs") + @offsetOf(Vcpu.Regs, field.name);
+            code = code ++ switch (dir) {
+                .to_cpu => std.fmt.comptimePrint("mov {d}(%rdi), %{s}\n", .{ offset, field.name }),
+                .from_cpu => std.fmt.comptimePrint("mov %{s}, {d}(%rdi)\n", .{ field.name, offset }),
+            };
+        }
+        return code;
+    }
+}
+
+const regs_rdi_offset = @offsetOf(Vcpu, "regs") + @offsetOf(Vcpu.Regs, "rdi");
+
+/// `rdi` points at the `Vcpu` to enter. Returns 1 in `al` at its next VM-exit
+/// (through `__vmExit`) and 0 if the entry failed.
+///
+/// it pushes the host's callee-saved registers and then the `*Vcpu`, and points
+/// `HOST_RSP` at that, so `__vmExit` finds the vcpu on top of the stack.
+export fn __vmEnter() callconv(.naked) void {
     asm volatile (std.fmt.comptimePrint(
             \\ push %rbp
-            \\ mov %rsp, %rbp
-            \\ mov %rbp, {[old_rbp]d}(%rsi)
-            \\ mov %rsp, {[old_rsp]d}(%rsi)
-            \\
-            \\ mov %rdi, %rax
-            \\ mov 0(%rax), %r15
-            \\ mov 8(%rax), %r14
-            \\ mov 16(%rax), %r13
-            \\ mov 24(%rax), %r12
-            \\ mov 32(%rax), %r11
-            \\ mov 40(%rax), %r10
-            \\ mov 48(%rax), %r9
-            \\ mov 56(%rax), %r8
-            \\ mov 80(%rax), %rbp
-            \\ mov 88(%rax), %rbx
-            \\ mov 96(%rax), %rdx
-            \\ mov 104(%rax), %rcx
-            \\ mov 72(%rax), %rsi
-            \\ mov 64(%rax), %rdi
-            \\ mov 112(%rax), %rax
-            \\
-            \\ vmlaunch
-            \\
-            \\ call __vmlaunchFailed
-            \\ mov $0, %rax
-            \\ pop %rbp
-            \\ ret
-        , .{
-            .old_rbp = @offsetOf(Vcpu, "old_rbp"),
-            .old_rsp = @offsetOf(Vcpu, "old_rsp"),
-        }) ::: .{ .rax = true, .memory = true });
-}
-
-export fn __vmlaunchFailed() callconv(.c) void {
-    std.log.err("vmlaunch failed with error code: {d}\n", .{vmx.vmerr()});
-}
-
-/// Return to the `call __vmlaunch` site after a handled VM-exit.
-/// must be naked and entered with `jmp` (not `call`) so there is no C prologue.
-/// `rbx` points at the frame pushed by `vmExitHandler`.
-export fn __vmReturnSucceed() callconv(.naked) void {
-    asm volatile (std.fmt.comptimePrint(
-            \\ mov {[vcpu_slot]d}(%rbx), %rax
-            \\ mov {[old_rbp]d}(%rax), %rbp
-            \\ mov {[old_rsp]d}(%rax), %rsp
-            \\ mov $1, %rax
-            \\ pop %rbp
-            \\ ret
-        , .{
-            .vcpu_slot = Vcpu.exit_frame_size,
-            .old_rbp = @offsetOf(Vcpu, "old_rbp"),
-            .old_rsp = @offsetOf(Vcpu, "old_rsp"),
-        }) ::: .{ .rax = true, .rbp = true, .rsp = true });
-}
-
-pub fn vmExitHandler() callconv(.naked) void {
-    asm volatile (std.fmt.comptimePrint(
-            \\ push %rax
-            \\ push %rcx
-            \\ push %rdx
             \\ push %rbx
-            \\ push %rbp
-            \\ push %rsi
-            \\ push %rdi
-            \\ push %r8
-            \\ push %r9
-            \\ push %r10
-            \\ push %r11
             \\ push %r12
             \\ push %r13
             \\ push %r14
             \\ push %r15
+            \\ push %rdi
             \\
-            \\ // rbx is callee-saved under SysV.
-            \\ mov %rsp, %rbx
-            \\ // the `*Vcpu` slot sits right above the pushed frame
-            \\ mov {[vcpu_slot]d}(%rbx), %rdi
-            \\ mov %rbx, %rsi
+            \\ mov ${[host_rsp]d}, %rax
+            \\ vmwrite %rsp, %rax
             \\
-            \\ // force the 16-byte alignment SysV wants
-            \\ and $-16, %rsp
-            \\ call mainVmExitHandler
+            \\ // the movs below leave the flags alone, `jne` still sees this
+            \\ cmpb $0, {[launched]d}(%rdi)
             \\
-            \\ // al is an `ExitAction`
-            \\ // exit(1) => stop and return to kmain
-            \\ cmp $1, %al
-            \\ je __vmReturnSucceed
+        , .{
+            .host_rsp = @intFromEnum(vmx.SelectorField.HOST_RSP),
+            .launched = @offsetOf(Vcpu, "launched"),
+        }) ++ regMoves(.to_cpu) ++ std.fmt.comptimePrint(
+            \\ mov {[rdi]d}(%rdi), %rdi
             \\
-            \\ // resume_at_rip(2) => the handler already set GUEST_RIP
-            \\ cmp $2, %al
-            \\ je 1f
-            \\ call resumeToNextInstruction
+            \\ jne 1f
+            \\ vmlaunch
+            \\ jmp 2f
             \\1:
-            \\ mov %rbx, %rsp
-            \\
+            \\ vmresume
+            \\2:
+            \\ // the entry failed, the guest's registers are only in `Vcpu.regs`
+            \\ add $8, %rsp
             \\ pop %r15
             \\ pop %r14
             \\ pop %r13
             \\ pop %r12
-            \\ pop %r11
-            \\ pop %r10
-            \\ pop %r9
-            \\ pop %r8
-            \\ pop %rdi
-            \\ pop %rsi
-            \\ pop %rbp
             \\ pop %rbx
-            \\ pop %rdx
-            \\ pop %rcx
-            \\ pop %rax
-            \\
-            \\ vmresume
-            \\
-            \\ call vmResumeInstructionFailed
-        , .{ .vcpu_slot = Vcpu.exit_frame_size }));
+            \\ pop %rbp
+            \\ xor %eax, %eax
+            \\ ret
+        , .{ .rdi = regs_rdi_offset }));
+}
+
+/// `HOST_RIP`, a VM-exit lands here with the stack `__vmEnter` left: the `*Vcpu`
+/// on top, the host's callee-saved registers under it. Stores the guest's registers
+/// in `Vcpu.regs` and returns 1 from `__vmEnter`.
+pub export fn __vmExit() callconv(.naked) void {
+    asm volatile (
+        \\ push %rdi
+        \\ mov 8(%rsp), %rdi
+        \\
+    ++ regMoves(.from_cpu) ++ std.fmt.comptimePrint(
+        \\ pop %rax
+        \\ mov %rax, {[rdi]d}(%rdi)
+        \\
+        \\ add $8, %rsp
+        \\ pop %r15
+        \\ pop %r14
+        \\ pop %r13
+        \\ pop %r12
+        \\ pop %rbx
+        \\ pop %rbp
+        \\ mov $1, %eax
+        \\ ret
+    , .{ .rdi = regs_rdi_offset }));
 }
 
 const rflags_if: u64 = 1 << 9;
@@ -674,76 +646,18 @@ const ActivityState = enum(u64) {
     hlt = 1,
 };
 
-/// What `vmExitHandler` does once `mainVmExitHandler` returns. values are matched in its asm.
-pub const ExitAction = enum(u8) {
+/// What `Vcpu.handleExit` does once a VM-exit is decided on.
+pub const ExitAction = enum {
     /// advance RIP past the exiting instruction, then resume the guest
-    @"resume" = 0,
-    /// leave the guest and return to kmain
-    exit = 1,
+    @"resume",
+    /// stop the vcpu, the scheduler never enters it again
+    exit,
     /// resume the guest at GUEST_RIP as is, for handlers that set RIP themselves (e.g. an emulated IRET)
-    resume_at_rip = 2,
+    resume_at_rip,
 };
 
-/// Returns what the VMM should do next, see `ExitAction`.
-/// `vcpu` is the vcpu that exited, `guest_regs` the frame `vmExitHandler` pushed.
-export fn mainVmExitHandler(vcpu: *Vcpu, guest_regs: *Vcpu.Regs) callconv(.c) ExitAction {
-    vcpu.regs = guest_regs;
-
-    const exit_reason: vmx.ExitReason = @enumFromInt(vmread(.VM_EXIT_REASON) & 0xffff);
-    const exit_qual: vmx.ExitQualification = .{
-        .backing_int = vmread(.EXIT_QUALIFICATION),
-    };
-
-    const old_debug_enable = debug.logging_enabled;
-    defer debug.logging_enabled = old_debug_enable;
-    switch (exit_reason) {
-        .io_instruction,
-        .cr_access,
-        .external_interrupt,
-        .hlt,
-        .pending_virt_intr,
-        .vmx_preemption_timer_expired,
-        // every timer tick is an EOI write and often a count read: logging them makes each
-        // interrupt take longer than the timer period, and the guest never leaves its handler
-        .ept_violation,
-        // FS_BASE is written on every context switch between user processes
-        .msr_write,
-        .msr_read,
-        => debug.logging_enabled = false,
-        else => {},
-    }
-
-    std.log.info("vm exit! info: .{{ .reason = {s}, .qual = 0x{x}, .addr = 0x{x} }}\n", .{
-        @tagName(exit_reason),
-        exit_qual.backing_int,
-        vmread(.GUEST_RIP),
-    });
-
-    Vcpu.reinjectInterruptedEvent();
-    const action = vcpu.tryExitReason(exit_reason, exit_qual) catch |err| switch (err) {
-        error.Aborted => {
-            std.log.err("vcpu {d} aborted at rip 0x{x} after {s} (0x{x}); not resuming\n", .{
-                vcpu.index,
-                vmread(.GUEST_RIP),
-                @tagName(exit_reason),
-                exit_qual.backing_int,
-            });
-            return .exit;
-        },
-    };
-    if (action != .exit) vcpu.prepareEntry();
-    return action;
-}
-
-export fn resumeToNextInstruction() callconv(.c) void {
+fn resumeToNextInstruction() void {
     const current_rip = vmread(.GUEST_RIP);
     const exit_instr_len = vmread(.VM_EXIT_INSTRUCTION_LEN);
     vmwrite(.GUEST_RIP, current_rip +% exit_instr_len);
-}
-
-export fn vmResumeInstructionFailed() callconv(.c) noreturn {
-    std.log.err("vmresume failed with error code: {d}\n", .{vmx.vmerr()});
-
-    while (true)
-        asm volatile ("hlt");
 }

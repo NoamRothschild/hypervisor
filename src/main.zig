@@ -2,7 +2,7 @@ const std = @import("std");
 const debug = @import("debug.zig");
 const gdt = @import("arch/x86_64/gdt.zig");
 const vmx = @import("virt/vmx.zig");
-const Vcpu = @import("virt/vcpu.zig").Vcpu;
+const Pcpu = @import("virt/pcpu.zig").Pcpu;
 const ept = @import("virt/ept.zig");
 const vmcs = @import("virt/vmcs.zig");
 const mbt2 = @import("arch/x86_64/multiboot2.zig");
@@ -87,37 +87,23 @@ pub fn kmain() !void {
         trap();
     }
 
+    var pcpu: Pcpu = undefined;
+    try pcpu.init();
+    defer vmx.vmxoff();
+
     const guest_states: *[1]vmx.VMState = @ptrCast(try kalloc.allocPage());
 
     for (guest_states) |*guest_state| {
-        vmx.enableOperation();
-        std.log.info("vmx enabled\n", .{});
-
-        defer vmx.vmxoff();
-        try guest_state.prepare(&guest_alloc, .{
-            .ram_block_count = 5, // 5GB memory
+        try guest_state.prepare(&pcpu, &guest_alloc, .{
+            .ram_block_count = 2, // 2GB memory
             .vcpu_count = 1,
         });
         try linux.load(guest_state);
-
-        // TODO: run this for each vcpu, on its own core
-        const vcpu = &guest_state.cpus[0];
-        vmx.vmwrite(.GUEST_RIP, linux.layout.kernel_base);
-
-        // the 32-bit boot protocol: esi points at the zero page, and ebx, ebp
-        // and edi must be zero
-        var guest_regs: Vcpu.Regs = std.mem.zeroes(Vcpu.Regs);
-        guest_regs.rsi = linux.layout.bootparam;
-
-        std.log.info("launching guest...\n", .{});
-        if (vcpu.vmlaunch(&guest_regs)) {
-            std.log.info("vm launch finished\n", .{});
-        } else {
-            std.log.info("vm launch finished failed\n", .{});
-        }
-
-        trap();
     }
+
+    std.log.info("launching guest...\n", .{});
+    pcpu.run();
+    std.log.info("guest stopped\n", .{});
 
     trap();
 }

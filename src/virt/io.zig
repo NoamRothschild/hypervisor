@@ -65,13 +65,13 @@ pub fn handleSerialIn(vcpu: *Vcpu, qual: IoQual) error{Aborted}!void {
         // Receive buffer
         0x3F8 => vcpu.regs.rax = debug.inb(qual.port), // pass-through
         // Interrupt Enable Register (DLAB=1) / Divisor Latch High Register (DLAB=0)
-        0x3F9 => vcpu.regs.rax = vcpu.serial.ier,
+        0x3F9 => vcpu.regs.rax = vcpu.vm.serial.ier,
         // Interrupt Identification Register
         0x3FA => vcpu.regs.rax = debug.inb(qual.port), // pass-through
         // Line Control Register (MSB is DLAB)
         0x3FB => vcpu.regs.rax = 0x00,
         // Modem Control Register
-        0x3FC => vcpu.regs.rax = vcpu.serial.mcr,
+        0x3FC => vcpu.regs.rax = vcpu.vm.serial.mcr,
         // Line Status Register
         0x3FD => vcpu.regs.rax = debug.inb(qual.port), // pass-through
         // Modem Status Register
@@ -89,13 +89,13 @@ fn handleSerialOut(vcpu: *Vcpu, qual: IoQual) error{Aborted}!void {
         // Transmit buffer
         0x3F8 => debug.outb(debug.COM1, @truncate(vcpu.regs.rax)),
         // Interrupt Enable Register
-        0x3F9 => vcpu.serial.ier = @truncate(vcpu.regs.rax),
+        0x3F9 => vcpu.vm.serial.ier = @truncate(vcpu.regs.rax),
         // FIFO control registers
         0x3FA => {}, // ignore
         // Line Control Register (MSB is DLAB)
         0x3FB => {}, // ignore
         // Modem Control Register
-        0x3FC => vcpu.serial.mcr = @truncate(vcpu.regs.rax),
+        0x3FC => vcpu.vm.serial.mcr = @truncate(vcpu.regs.rax),
         // Scratch Register
         0x3FF => {}, // ignore
         else => try vcpu.abortMsg("Unsupported I/O-out to the first serial port: 0x{X}\n", .{qual.port}),
@@ -131,7 +131,7 @@ pub const Pic = struct {
 };
 
 fn handlePicIn(vcpu: *Vcpu, qual: IoQual) error{Aborted}!void {
-    const pic = &vcpu.pic;
+    const pic = &vcpu.vm.pic;
 
     switch (qual.port) {
         // IRR or ISR, whichever OCW3 last picked. the host takes and EOIs every IRQ
@@ -152,8 +152,8 @@ fn handlePicIn(vcpu: *Vcpu, qual: IoQual) error{Aborted}!void {
 }
 
 fn handlePicOut(vcpu: *Vcpu, qual: IoQual) error{Aborted}!void {
-    const regs = vcpu.regs;
-    const pic = &vcpu.pic;
+    const regs = &vcpu.regs;
+    const pic = &vcpu.vm.pic;
     const dx: u8 = @truncate(regs.rax);
 
     switch (qual.port) {

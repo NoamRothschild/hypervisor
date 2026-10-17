@@ -76,7 +76,7 @@ pub fn init() void {
     timer.init(50); // TODO: change the frequency to not be an arbitrary value
 
     // make COM1 raise IRQ4 when a byte is received and when it finished sending a byte.
-    // the guest's own writes to IER never reach the hardware (`virt/io.zig` only stores them in `vcpu.serial.ier`)
+    // the guest's own writes to IER never reach the hardware (`virt/io.zig` only stores them in `vm.serial.ier`)
     outb(debug.COM1 + 1, 0b0000_0011);
 }
 

@@ -8,13 +8,14 @@ const gdt = @import("../arch/x86_64/gdt.zig");
 const idt = @import("../arch/x86_64/idt.zig");
 const ept = @import("ept.zig");
 const KAlloc = @import("../mem/allocator.zig").KAlloc;
-const GuestAllocator = @import("../mem/guest_allocator.zig");
 const vcpu_mod = @import("vcpu.zig");
 const Vcpu = vcpu_mod.Vcpu;
 const rdmsr = msr.rdmsr;
 const wrmsr = msr.wrmsr;
 const vmwrite = vmx.vmwrite;
 
+/// Fills in the current VMCS with the host state and the controls, the same for
+/// every vcpu. The guest state is left to `setGuestStart`.
 pub fn setup(vcpu: *Vcpu, kalloc: *KAlloc, eptp: ept.EPTP) !void {
     vmwriteAsm(.HOST_ES_SELECTOR,
         \\ mov %es, %rbx
@@ -70,11 +71,6 @@ pub fn setup(vcpu: *Vcpu, kalloc: *KAlloc, eptp: ept.EPTP) !void {
 
     const gdt_info = gdt.gdtInfo();
 
-    setupGuestState32();
-
-    vmwrite(.GUEST_INTERRUPTIBILITY_INFO, 0);
-    vmwrite(.GUEST_ACTIVITY_STATE, 0);
-
     vmwrite(.CPU_BASED_VM_EXEC_CONTROL, try adjustControls(VmExecutionControl, .IA32_VMX_PROCBASED_CTLS, &.{
         .optional(.CPU_BASED_HLT_EXITING),
         .optional(.CPU_BASED_ACTIVATE_SECONDARY_CONTROLS),
@@ -123,17 +119,15 @@ pub fn setup(vcpu: *Vcpu, kalloc: *KAlloc, eptp: ept.EPTP) !void {
         .optional(.VM_ENTRY_LOAD_GUEST_PAT),
     }));
 
-    setupGuestControlRegs();
+    // every CR0 and CR4 bit is host-owned: guest writes exit to `cr.zig`, and guest
+    // reads see the read shadows, which `setupGuestControlRegs` fills in
+    vmwrite(.CR0_GUEST_HOST_MASK, std.math.maxInt(u64));
+    vmwrite(.CR4_GUEST_HOST_MASK, std.math.maxInt(u64));
     vmwrite(.HOST_IA32_EFER, rdmsr(.EFER));
 
     vmwriteAsm(.HOST_CR0, "mov %cr0, %rbx");
     vmwriteAsm(.HOST_CR3, "mov %cr3, %rbx");
     vmwriteAsm(.HOST_CR4, "mov %cr4, %rbx");
-
-    vmwrite(.GUEST_GDTR_BASE, 0);
-    vmwrite(.GUEST_GDTR_LIMIT, 0);
-    vmwrite(.GUEST_IDTR_BASE, 0);
-    vmwrite(.GUEST_IDTR_LIMIT, 0);
 
     vmwrite(.HOST_TR_BASE, gdt.getSegmentDescriptor(getTr(), gdt_info.base).base());
 
@@ -142,12 +136,6 @@ pub fn setup(vcpu: *Vcpu, kalloc: *KAlloc, eptp: ept.EPTP) !void {
 
     vmwrite(.HOST_IDTR_BASE, idt.idt_descriptor.base);
     vmwrite(.HOST_GDTR_BASE, gdt_info.base);
-
-    // Bit 10 of DR7 is reserved and must be 1.
-    vmwrite(.GUEST_DR7, 0x400);
-
-    // bit 1 is reserved and must be 1; IF=0, the guest enables interrupts itself
-    vmwrite(.GUEST_RFLAGS, 0x2);
 
     vmwrite(.MSR_BITMAP, vcpu.vm.msr_bitmap_phys.raw());
     vmwrite(.IO_BITMAP_A, hhdm.physOf(vcpu.vm.io_bitmap.first).raw());
@@ -162,13 +150,45 @@ pub fn setup(vcpu: *Vcpu, kalloc: *KAlloc, eptp: ept.EPTP) !void {
     vmwrite(.HOST_IA32_SYSENTER_EIP, rdmsr(.IA32_SYSENTER_EIP));
     vmwrite(.HOST_IA32_SYSENTER_ESP, rdmsr(.IA32_SYSENTER_ESP));
 
-    // top of the RAM below the MMIO hole, so the stack is RAM even for a 32-bit guest
-    const low_blocks: u64 = @min(vcpu.vm.guest_ram_block_count, ept.mmio_hole_start.raw() >> 30);
-    vmwrite(.GUEST_RSP, low_blocks * GuestAllocator.block_size);
-    vmwrite(.GUEST_RIP, 0);
+    // HOST_RSP is written by `__vmEnter` before every entry, it depends on where it was called from
+    vmwrite(.HOST_RIP, @intFromPtr(&vcpu_mod.__vmExit));
+}
 
-    vmwrite(.HOST_RSP, vcpu.hostRsp());
-    vmwrite(.HOST_RIP, @intFromPtr(&vcpu_mod.vmExitHandler));
+/// The state a vcpu starts executing in, see `setGuestStart`.
+pub const GuestStart = union(enum) {
+    /// 32-bit protected mode with paging off and flat segments, the entry the Linux
+    /// 32-bit boot protocol expects. see `setupGuestState32`
+    protected32: struct {
+        rip: u32,
+        rsp: u32,
+        /// a GDT with the descriptors `setupGuestState32` selects
+        gdtr_base: u32,
+        gdtr_limit: u16,
+    },
+};
+
+/// Writes `start` into the guest state of the current VMCS. The general purpose
+/// registers other than RSP aren't in the VMCS, see `Vcpu.regs`.
+pub fn setGuestStart(start: GuestStart) void {
+    switch (start) {
+        .protected32 => |s| {
+            setupGuestState32();
+            setupGuestControlRegs();
+            vmwrite(.GUEST_GDTR_BASE, s.gdtr_base);
+            vmwrite(.GUEST_GDTR_LIMIT, s.gdtr_limit);
+            vmwrite(.GUEST_IDTR_BASE, 0);
+            vmwrite(.GUEST_IDTR_LIMIT, 0);
+            vmwrite(.GUEST_RSP, s.rsp);
+            vmwrite(.GUEST_RIP, s.rip);
+        },
+    }
+
+    // Bit 10 of DR7 is reserved and must be 1.
+    vmwrite(.GUEST_DR7, 0x400);
+    // bit 1 is reserved and must be 1; IF=0, the guest enables interrupts itself
+    vmwrite(.GUEST_RFLAGS, 0x2);
+    vmwrite(.GUEST_INTERRUPTIBILITY_INFO, 0);
+    vmwrite(.GUEST_ACTIVITY_STATE, 0);
 }
 
 /// calls vmwrite for the given selector with the given value
@@ -287,9 +307,6 @@ fn setupGuestControlRegs() void {
     // meaningless with paging off; the guest installs its own tables
     vmwrite(.GUEST_CR3, 0);
 
-    // let the guest own CR0 (it needs to set PG itself), but hide CR4.VMXE
-    vmwrite(.CR0_GUEST_HOST_MASK, std.math.maxInt(u64));
-    vmwrite(.CR4_GUEST_HOST_MASK, std.math.maxInt(u64));
     vmwrite(.CR0_READ_SHADOW, guest_cr0);
     // VMXE is forced on in the guest field, but the guest must not see it
     vmwrite(.CR4_READ_SHADOW, guest_cr4 & ~cr4_vmxe);

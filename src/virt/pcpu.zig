@@ -1,0 +1,181 @@
+const std = @import("std");
+const hhdm = @import("../mem/hhdm.zig");
+const mem_allocator = @import("../mem/allocator.zig");
+const debug = @import("../debug.zig");
+const msr = @import("msr.zig");
+const vmx = @import("vmx.zig");
+const ept = @import("ept.zig");
+const lapic = @import("smp/lapic.zig");
+const tsc = @import("../arch/x86_64/tsc.zig");
+const pic_hw = @import("../arch/x86_64/pic.zig");
+const Vcpu = @import("vcpu.zig").Vcpu;
+
+/// Everything that belongs to a physical core the hypervisor runs on, rather than
+/// to a vcpu: VMX operation is entered once per core, a core has one current VMCS,
+/// and it time-shares the vcpus it was given (`add`) between them.
+pub const Pcpu = struct {
+    vmxon_region: ept.HostPhys,
+    /// the vcpu whose VMCS is current on this core (`vmptrld`), null before the first `load`
+    current: ?*Vcpu,
+    /// the vcpus this core runs, `vcpus[0..vcpu_count]`
+    vcpus: [max_vcpus]*Vcpu,
+    vcpu_count: usize,
+    /// round-robin position, where `pickNext` looks for a vcpu first
+    next: usize,
+    /// when the running vcpu has to make way for another runnable one
+    slice_end_tsc: u64,
+    /// the VMX-preemption timer counts down once every 2^shift TSC cycles (IA32_VMX_MISC[4:0])
+    preemption_timer_shift: u5,
+
+    pub const max_vcpus = 16;
+    /// how long a vcpu runs before another runnable one gets its turn
+    const slice_ms = 1;
+
+    /// enters VMX operation on the calling core
+    pub fn init(self: *Pcpu) !void {
+        self.current = null;
+        self.vcpu_count = 0;
+        self.next = 0;
+        self.slice_end_tsc = 0;
+        self.preemption_timer_shift = @truncate(msr.rdmsr(.IA32_VMX_MISC));
+
+        vmx.enableOperation();
+        std.log.info("vmx enabled\n", .{});
+
+        try self.allocVmxonRegion();
+        self.vmxon() catch |err| {
+            std.log.err("VMXON failed: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        std.log.info("VMXON succeeded\n", .{});
+    }
+
+    /// makes this core run `vcpu`, from the next `run` on
+    pub fn add(self: *Pcpu, vcpu: *Vcpu) error{TooManyVcpus}!void {
+        if (self.vcpu_count == max_vcpus) return error.TooManyVcpus;
+        self.vcpus[self.vcpu_count] = vcpu;
+        self.vcpu_count += 1;
+    }
+
+    /// makes `vcpu`'s VMCS the current one, every vmread and vmwrite goes to it.
+    pub fn load(self: *Pcpu, vcpu: *Vcpu) !void {
+        if (self.current == vcpu) return;
+        // errors are logged inside
+        if (!vcpu.vmptrld())
+            return error.VmcsLoadFailed;
+        self.current = vcpu;
+    }
+
+    /// Runs the vcpus until none of them is runnable anymore.
+    pub fn run(self: *Pcpu) void {
+        // IRQs from before the guests existed aren't theirs to receive
+        _ = pic_hw.takeReceived();
+
+        while (self.pickNext()) |vcpu| {
+            self.load(vcpu) catch {
+                vcpu.state = .stopped;
+                continue;
+            };
+            vcpu.prepareEntry();
+            self.armPreemptionTimer();
+            if (!vcpu.enter())
+                vcpu.state = .stopped
+            else
+                vcpu.handleExit();
+        }
+    }
+
+    /// The vcpu to enter next: the current one until its slice ends, then the next
+    /// runnable one round-robin. null when no vcpu is runnable.
+    fn pickNext(self: *Pcpu) ?*Vcpu {
+        const now = tsc.read();
+        if (self.current) |cur| {
+            if (cur.state == .runnable and now < self.slice_end_tsc)
+                return cur;
+        }
+
+        const vcpus = self.vcpus[0..self.vcpu_count];
+        for (0..vcpus.len) |i| {
+            const idx = (self.next + i) % vcpus.len;
+            const vcpu = vcpus[idx];
+            if (vcpu.state != .runnable) continue;
+
+            self.next = (idx + 1) % vcpus.len;
+            self.slice_end_tsc = now + tsc.hz * slice_ms / 1000;
+            return vcpu;
+        }
+        return null;
+    }
+
+    /// The earliest LAPIC timer expiry among this core's vcpus, null if none is armed.
+    fn nextDeadline(self: *Pcpu) ?u64 {
+        var earliest: ?u64 = null;
+        for (self.vcpus[0..self.vcpu_count]) |vcpu| {
+            if (vcpu.state != .runnable) continue;
+            const deadline = lapic.timerDeadline(vcpu) orelse continue;
+            if (earliest == null or deadline < earliest.?) earliest = deadline;
+        }
+        return earliest;
+    }
+
+    /// whether a vcpu other than the current one waits to run
+    fn othersRunnable(self: *Pcpu) bool {
+        for (self.vcpus[0..self.vcpu_count]) |vcpu| {
+            if (vcpu != self.current and vcpu.state == .runnable) return true;
+        }
+        return false;
+    }
+
+    /// Makes the current vcpu exit by the next LAPIC timer expiry of any vcpu (so
+    /// it's delivered on time), or by the end of its slice when another vcpu waits.
+    fn armPreemptionTimer(self: *Pcpu) void {
+        var until: ?u64 = self.nextDeadline();
+        if (self.othersRunnable()) {
+            if (until == null or self.slice_end_tsc < until.?) until = self.slice_end_tsc;
+        }
+
+        const ticks: u64 = if (until) |t|
+            (t -| tsc.read()) >> self.preemption_timer_shift
+        else
+            std.math.maxInt(u32);
+        vmx.vmwrite(.VMX_PREEMPTION_TIMER_VALUE, @min(ticks, std.math.maxInt(u32)));
+    }
+
+    /// Prepares the VMXON region. `vmxon()` executes it.
+    fn allocVmxonRegion(self: *Pcpu) !void {
+        const vmxon_page = try mem_allocator.kalloc.allocPage();
+        const vmxon_region_phys = hhdm.physOf(vmxon_page);
+
+        std.log.info("virtual buff addr for VMXON at 0x{x}\n", .{@intFromPtr(vmxon_page)});
+        std.log.info("physical buff addr for VMXON at 0x{x}\n", .{vmxon_region_phys.raw()});
+
+        @memset(vmxon_page, 0);
+        @as(*volatile u32, @ptrCast(vmxon_page)).* = vmx.revisionIdentifier();
+        self.vmxon_region = vmxon_region_phys;
+    }
+
+    /// executes VMXON with this core's region, entering VMX operation.
+    fn vmxon(self: *Pcpu) !void {
+        // carry flag result
+        var failed: u8 = undefined;
+        // zero flag result
+        var valid_fail: u8 = undefined;
+
+        asm volatile (
+            \\ vmxon (%[vmxon_phys_ptr])
+            \\ setc %[failed]
+            \\ setz %[valid_fail]
+            : [failed] "=qm" (failed),
+              [valid_fail] "=qm" (valid_fail),
+            : [vmxon_phys_ptr] "r" (&self.vmxon_region),
+        );
+
+        if (failed != 0)
+            return error.vmxon_failed_cf;
+
+        if (valid_fail != 0) {
+            debug.printf("vmxon failed with {d}\n", .{vmx.vmerr()});
+            return error.vmxon_failed_with_code;
+        }
+    }
+};

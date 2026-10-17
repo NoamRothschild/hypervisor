@@ -7,6 +7,8 @@ const debug = @import("../debug.zig");
 const vmcs = @import("vmcs.zig");
 const GuestAllocator = @import("../mem/guest_allocator.zig");
 const Vcpu = @import("vcpu.zig").Vcpu;
+const Pcpu = @import("pcpu.zig").Pcpu;
+const io = @import("io.zig");
 const rdmsr = msr.rdmsr;
 const wrmsr = msr.wrmsr;
 
@@ -82,8 +84,15 @@ pub const VMState = struct {
     guest_pml4: *align(4096) [512]ept.EPT_PML4E,
     /// `.len` is always greater than 0
     guest_mem_pages: []*align(0x1000) [1 << 30]u8,
-    /// per-core state, one entry per logical core of the guest
+    /// per-core state, one entry per logical core of the guest. `cpus[0]` is the BSP.
     cpus: []Vcpu,
+
+    // devices shared by every vcpu
+    serial: io.Serial,
+    /// the 8259 pair, wired to the BSP's LINT0 only, see `Vcpu.pendingPicIrq`
+    pic: io.Pic,
+    /// host IRQs not yet injected into the guest, bit n is IRQ n. filled from `pic.takeReceived`.
+    pending_irq: u16,
 
     pub const VMConfig = struct {
         os: enum { linux, windows } = .linux,
@@ -92,13 +101,14 @@ pub const VMState = struct {
         ram_block_count: usize = 2,
     };
 
-    /// initializes the given VMState, as long as
-    /// - initializing a basic EPT
-    /// - creating each vcpu: calling vmxon, setting up its vmcs, and loading
-    ///   the vmcs into the cpu (vmptrld)
+    /// initializes the given VMState:
+    /// - a basic EPT, the msr and io bitmaps, and the devices
+    /// - each vcpu, with its VMCS cleared, loaded on `pcpu` and set up, and added to
+    ///   the vcpus `pcpu` runs
     ///
-    /// vmx operation must be enabled (`enableOperation`) on the calling core.
-    pub fn prepare(self: *VMState, guest_allocator: *GuestAllocator, config: VMConfig) !void {
+    /// the vcpus are left stopped, the guest OS loader starts the BSP (`Vcpu.start`).
+    /// `pcpu` must be in VMX operation (`Pcpu.init`).
+    pub fn prepare(self: *VMState, pcpu: *Pcpu, guest_allocator: *GuestAllocator, config: VMConfig) !void {
         self.guest_ram_block_count = config.ram_block_count;
 
         const eptp = try ept.init(self, guest_allocator, config.ram_block_count);
@@ -122,29 +132,20 @@ pub const VMState = struct {
         for (0x0040..0x0047 + 1) |port|
             self.io_bitmap.passPort(@truncate(port));
 
+        self.serial = .{};
+        self.pic = .init;
+        self.pending_irq = 0;
+
         self.cpus = try mem_allocator.kalloc.alloc(Vcpu, config.vcpu_count);
-
-        // TODO: run this for each cpu, on that cpu
-        // for (self.cpus, 0..) |*vcpu, i| {
-        {
-            const vcpu = &self.cpus[0];
-            const i = 0;
+        for (self.cpus, 0..) |*vcpu, i| {
             try vcpu.init(self, i);
-
-            vcpu.vmxon() catch |err| {
-                std.log.err("VMXON failed: {s}\n", .{@errorName(err)});
-                return err;
-            };
-            std.log.info("VMXON succeeded\n", .{});
 
             // errors are logged inside the functions
             if (!vcpu.vmclear())
                 return error.clear_vmcs_failed;
-            if (!vcpu.vmptrld())
-                return error.vmcs_load_failed;
-            std.log.info("VMPTRLD succeeded\n", .{});
-
+            try pcpu.load(vcpu);
             try vmcs.setup(vcpu, &mem_allocator.kalloc, eptp);
+            try pcpu.add(vcpu);
         }
     }
 };
@@ -152,6 +153,13 @@ pub const VMState = struct {
 pub fn vmxoff() void {
     std.log.info("terminating vmx...\n", .{});
     asm volatile ("vmxoff");
+}
+
+/// The revision identifier a VMXON region and a VMCS start with (IA32_VMX_BASIC[30:0]).
+pub fn revisionIdentifier() u32 {
+    const revision_identifier: u32 = @truncate(rdmsr(.IA32_VMX_BASIC));
+    std.log.info("IA32_VMX_BASIC revision identifier: 0x{x}\n", .{revision_identifier});
+    return revision_identifier;
 }
 
 /// reads the instruction error field to get the error code
@@ -281,7 +289,7 @@ pub const ExitQualification = packed union(u64) {
         pub fn setVal(self: @This(), vcpu: *Vcpu, value: u64) void {
             switch (self.reg) {
                 .rsp => vmwrite(.GUEST_RSP, value),
-                inline else => |reg| @field(vcpu.regs.*, @tagName(reg)) = value,
+                inline else => |reg| @field(vcpu.regs, @tagName(reg)) = value,
             }
         }
 
@@ -289,7 +297,7 @@ pub const ExitQualification = packed union(u64) {
         pub fn getVal(self: @This(), vcpu: *Vcpu) u64 {
             return switch (self.reg) {
                 .rsp => vmread(.GUEST_RSP),
-                inline else => |v| @field(vcpu.regs.*, @tagName(v)),
+                inline else => |v| @field(vcpu.regs, @tagName(v)),
             };
         }
     };

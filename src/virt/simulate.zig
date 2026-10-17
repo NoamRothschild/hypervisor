@@ -41,7 +41,7 @@ pub fn iret16(guest_state: *vmx.VMState) !void {
 }
 
 pub fn rdmsr(vcpu: *Vcpu) error{Aborted}!void {
-    const guest_regs = vcpu.regs;
+    const guest_regs = &vcpu.regs;
     const msr_kind: msr.All = @enumFromInt(guest_regs.rcx);
 
     const val: u64 = switch (msr_kind) {
@@ -106,7 +106,7 @@ pub fn rdmsr(vcpu: *Vcpu) error{Aborted}!void {
 }
 
 pub fn wrmsr(vcpu: *Vcpu) error{Aborted}!void {
-    const guest_regs = vcpu.regs;
+    const guest_regs = &vcpu.regs;
     const val = (@as(u64, guest_regs.edx().*) << 32) | @as(u64, guest_regs.eax().*);
     const msr_kind: msr.All = @enumFromInt(guest_regs.rcx);
 

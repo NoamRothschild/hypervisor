@@ -53,7 +53,7 @@ pub fn eptViolation(vcpu: *Vcpu, violating_addr: ept.GuestPhys) error{Aborted}!v
             };
             switch (mmio_instr.reg) {
                 .rsp => vmwrite(.GUEST_RSP, val),
-                inline else => |reg| @field(vcpu.regs.*, @tagName(reg)) = val,
+                inline else => |reg| @field(vcpu.regs, @tagName(reg)) = val,
             }
             std.log.info("lapic LOAD @ 0x{x} = 0x{x}\n", .{ offset, val });
         },
@@ -63,7 +63,7 @@ pub fn eptViolation(vcpu: *Vcpu, violating_addr: ept.GuestPhys) error{Aborted}!v
                     break :blk mmio_instr.imm;
                 break :blk @truncate(switch (mmio_instr.reg) {
                     .rsp => vmread(.GUEST_RSP),
-                    inline else => |v| @field(vcpu.regs.*, @tagName(v)),
+                    inline else => |v| @field(vcpu.regs, @tagName(v)),
                 });
             };
             std.log.info("lapic STORE @ 0x{x} = 0x{x}\n", .{ offset, val });

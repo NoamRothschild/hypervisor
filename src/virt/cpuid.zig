@@ -130,7 +130,7 @@ fn rawCpuid(leaf: u32, subleaf: u32) struct { eax: u32, ebx: u32, ecx: u32, edx:
 }
 
 pub fn cpuid(vcpu: *Vcpu) error{Aborted}!void {
-    const guest_regs = vcpu.regs;
+    const guest_regs = &vcpu.regs;
     const leaf: u32 = @truncate(guest_regs.rax);
     const subleaf: u32 = @truncate(guest_regs.rcx);
 

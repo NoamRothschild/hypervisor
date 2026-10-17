@@ -112,8 +112,20 @@ pub fn load(dst_guest: *vmx.VMState) !void {
 
     const guest_gdt = gdt32.flatProtectedMode();
     try ept.writeGuest(dst_guest, std.mem.asBytes(&guest_gdt), .from(layout.gdt));
-    vmx.vmwrite(.GUEST_GDTR_BASE, layout.gdt);
-    vmx.vmwrite(.GUEST_GDTR_LIMIT, @sizeOf(@TypeOf(guest_gdt)) - 1);
+
+    // the BSP enters the kernel, the APs wait for the kernel to start them
+    const bsp = &dst_guest.cpus[0];
+    // the 32-bit boot protocol: esi points at the zero page, and ebx, ebp
+    // and edi must be zero
+    bsp.regs = std.mem.zeroes(@TypeOf(bsp.regs));
+    bsp.regs.rsi = layout.bootparam;
+    bsp.start(.{ .protected32 = .{
+        .rip = layout.kernel_base,
+        // top of the RAM below the MMIO hole, so the stack is RAM even for a 32-bit guest
+        .rsp = @intCast((1 << 30) * low_blocks),
+        .gdtr_base = layout.gdt,
+        .gdtr_limit = @sizeOf(@TypeOf(guest_gdt)) - 1,
+    } });
 
     const code_offset = bp.hdr.protectedCodeOffset();
     const code_size = img.len - code_offset;
