@@ -96,7 +96,7 @@ pub fn kmain() !void {
     for (guest_states) |*guest_state| {
         try guest_state.prepare(&pcpu, &guest_alloc, .{
             .ram_block_count = 2, // 2GB memory
-            .vcpu_count = 1,
+            .vcpu_count = 2,
         });
         try linux.load(guest_state);
     }

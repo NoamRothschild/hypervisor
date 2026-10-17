@@ -165,6 +165,11 @@ pub const GuestStart = union(enum) {
         gdtr_base: u32,
         gdtr_limit: u16,
     },
+    /// real mode at `vector` << 12, where a startup IPI starts an AP.
+    /// runs only because unrestricted guest is on.
+    real_mode: struct {
+        vector: u8,
+    },
 };
 
 /// Writes `start` into the guest state of the current VMCS. The general purpose
@@ -173,7 +178,7 @@ pub fn setGuestStart(start: GuestStart) void {
     switch (start) {
         .protected32 => |s| {
             setupGuestState32();
-            setupGuestControlRegs();
+            setupGuestControlRegs(true);
             vmwrite(.GUEST_GDTR_BASE, s.gdtr_base);
             vmwrite(.GUEST_GDTR_LIMIT, s.gdtr_limit);
             vmwrite(.GUEST_IDTR_BASE, 0);
@@ -181,7 +186,23 @@ pub fn setGuestStart(start: GuestStart) void {
             vmwrite(.GUEST_RSP, s.rsp);
             vmwrite(.GUEST_RIP, s.rip);
         },
+        .real_mode => |s| {
+            setupGuestStateReal(s.vector);
+            setupGuestControlRegs(false);
+            // the values after reset, the AP loads its own before leaving real mode
+            vmwrite(.GUEST_GDTR_BASE, 0);
+            vmwrite(.GUEST_GDTR_LIMIT, 0xffff);
+            vmwrite(.GUEST_IDTR_BASE, 0);
+            vmwrite(.GUEST_IDTR_LIMIT, 0xffff);
+            vmwrite(.GUEST_RSP, 0);
+            vmwrite(.GUEST_RIP, 0);
+        },
     }
+
+    // neither start is in long mode. a vcpu restarted by INIT may have been, `cr.zig`
+    // sets this when the guest enables paging with PAE
+    const ia32e: u64 = @intFromEnum(VmEntryControl.VM_ENTRY_IA32E_MODE);
+    vmwrite(.VM_ENTRY_CONTROLS, vmx.vmread(.VM_ENTRY_CONTROLS) & ~ia32e);
 
     // Bit 10 of DR7 is reserved and must be 1.
     vmwrite(.GUEST_DR7, 0x400);
@@ -282,8 +303,28 @@ fn setupGuestState32() void {
     setGuestSegment(.ldtr, 0, 0, 0, 0x10000);
 }
 
-/// Guest control registers for a 32-bit protected-mode entry with paging off.
-fn setupGuestControlRegs() void {
+/// Guest segment state an AP starts in after a startup IPI: real mode, with CS
+/// at `vector` << 12 (selector `vector` << 8) and IP 0, the other segments at 0.
+/// every limit is 64KB.
+fn setupGuestStateReal(vector: u8) void {
+    // P=1, S=1, type=0xb (execute/read/accessed), 16-bit
+    const code_ar: u32 = 0x9b;
+    // P=1, S=1, type=0x3 (read/write/accessed), 16-bit
+    const data_ar: u32 = 0x93;
+    const real_limit: u32 = 0xffff;
+
+    setGuestSegment(.cs, @as(u16, vector) << 8, @as(u64, vector) << 12, real_limit, code_ar);
+    for ([_]SegReg{ .ds, .es, .ss, .fs, .gs }) |seg|
+        setGuestSegment(seg, 0, 0, real_limit, data_ar);
+
+    // same as in `setupGuestState32`: VM entry wants a usable, busy TR
+    setGuestSegment(.tr, 0, 0, 0xffff, 0x8b);
+    setGuestSegment(.ldtr, 0, 0, 0, 0x10000);
+}
+
+/// Guest control registers for an entry with paging off, in 32-bit protected mode
+/// or in real mode (`protected_mode` false).
+fn setupGuestControlRegs(protected_mode: bool) void {
     const cr0_pe: u64 = 1 << 0;
     const cr0_et: u64 = 1 << 4;
     const cr0_ne: u64 = 1 << 5;
@@ -292,7 +333,7 @@ fn setupGuestControlRegs() void {
 
     // Unrestricted guest exempts PE and PG from the fixed-0 requirements, so
     // mask them out before applying the mandatory bits, then force paging off.
-    var guest_cr0 = (cr0_pe | cr0_et | cr0_ne) |
+    var guest_cr0 = (if (protected_mode) cr0_pe else 0) | cr0_et | cr0_ne |
         (rdmsr(.IA32_VMX_CR0_FIXED0) & ~(cr0_pe | cr0_pg));
     guest_cr0 &= rdmsr(.IA32_VMX_CR0_FIXED1);
     guest_cr0 &= ~cr0_pg;

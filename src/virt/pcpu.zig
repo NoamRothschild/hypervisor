@@ -39,6 +39,7 @@ pub const Pcpu = struct {
         self.slice_end_tsc = 0;
         self.preemption_timer_shift = @truncate(msr.rdmsr(.IA32_VMX_MISC));
 
+        enableFxsave();
         vmx.enableOperation();
         std.log.info("vmx enabled\n", .{});
 
@@ -57,12 +58,15 @@ pub const Pcpu = struct {
         self.vcpu_count += 1;
     }
 
-    /// makes `vcpu`'s VMCS the current one, every vmread and vmwrite goes to it.
+    /// makes `vcpu`'s VMCS the current one, every vmread and vmwrite goes to it,
+    /// and swaps the guest state the cpu holds outside the VMCS (`Vcpu.fpu`) to it.
     pub fn load(self: *Pcpu, vcpu: *Vcpu) !void {
         if (self.current == vcpu) return;
         // errors are logged inside
         if (!vcpu.vmptrld())
             return error.VmcsLoadFailed;
+        if (self.current) |prev| prev.saveCpuState();
+        vcpu.restoreCpuState();
         self.current = vcpu;
     }
 
@@ -139,6 +143,35 @@ pub const Pcpu = struct {
         else
             std.math.maxInt(u32);
         vmx.vmwrite(.VMX_PREEMPTION_TIMER_VALUE, @min(ticks, std.math.maxInt(u32)));
+    }
+
+    /// Lets the host run the fxsave/fxrstor that swap the guests' x87/SSE state
+    /// (`Vcpu.saveCpuState`): CR0.EM and CR0.TS would fault them, and without
+    /// CR4.OSFXSR they may skip the XMM registers. The hypervisor is built without
+    /// SSE, so none of this changes how it runs. must happen before the VMCSs take
+    /// their HOST_CR0 and HOST_CR4 (`vmcs.setup`).
+    fn enableFxsave() void {
+        const cr0_em: u64 = 1 << 2;
+        const cr0_ts: u64 = 1 << 3;
+        const cr4_osfxsr: u64 = 1 << 9;
+
+        var cr0 = asm volatile ("mov %%cr0, %[cr0]"
+            : [cr0] "=r" (-> u64),
+        );
+        cr0 &= ~(cr0_em | cr0_ts);
+        asm volatile ("mov %[cr0], %%cr0"
+            :
+            : [cr0] "r" (cr0),
+            : .{ .memory = true });
+
+        var cr4 = asm volatile ("mov %%cr4, %[cr4]"
+            : [cr4] "=r" (-> u64),
+        );
+        cr4 |= cr4_osfxsr;
+        asm volatile ("mov %[cr4], %%cr4"
+            :
+            : [cr4] "r" (cr4),
+            : .{ .memory = true });
     }
 
     /// Prepares the VMXON region. `vmxon()` executes it.

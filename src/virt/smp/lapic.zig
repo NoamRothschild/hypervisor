@@ -2,6 +2,7 @@ const std = @import("std");
 const debug = @import("../../debug.zig");
 const ept = @import("../ept.zig");
 const instr_decoder = @import("instr_decoder.zig");
+const ipi = @import("ipi.zig");
 const Vcpu = @import("../vcpu.zig").Vcpu;
 const vmread = @import("../vmx.zig").vmread;
 const vmwrite = @import("../vmx.zig").vmwrite;
@@ -10,14 +11,20 @@ const tsc = @import("../../arch/x86_64/tsc.zig");
 pub const lapic_base = 0xfee00000;
 
 /// register offsets from `lapic_base`
+const apic_id = 0x20;
+const version = 0x30;
 const task_priority = 0x80;
 const processor_priority = 0xA0;
 const eoi = 0xB0;
+const logical_destination = 0xD0;
+const destination_format = 0xE0;
 const spurious_vector = 0xF0;
 /// in-service register, 8 words of 32 vectors each, 0x10 apart
 const isr_base = 0x100;
 /// interrupt request register, laid out like `isr_base`
 const irr_base = 0x200;
+const icr_low = 0x300;
+const icr_high = 0x310;
 const lvt_timer = 0x320;
 const lvt_lint0 = 0x350;
 const timer_initial_count = 0x380;
@@ -71,7 +78,11 @@ pub fn eptViolation(vcpu: *Vcpu, violating_addr: ept.GuestPhys) error{Aborted}!v
             switch (offset) {
                 0x30, processor_priority, 0x100...0x270, timer_current_count => {},
                 eoi => endOfInterrupt(vcpu),
-                0x300 => vcpu.virt_lapic[lapic_index] = val & ~(@as(u32, 1) << 12),
+                icr_low => {
+                    // the IPI is delivered right away, so it never reads as send pending
+                    vcpu.virt_lapic[lapic_index] = val & ~(@as(u32, 1) << 12);
+                    ipi.send(vcpu);
+                },
                 timer_initial_count => {
                     vcpu.virt_lapic[lapic_index] = val;
                     timerStart(vcpu, val);
@@ -89,6 +100,47 @@ pub fn eptViolation(vcpu: *Vcpu, violating_addr: ept.GuestPhys) error{Aborted}!v
 
 fn lapicReg(vcpu: *Vcpu, offset: usize) *u32 {
     return &vcpu.virt_lapic[offset / 4];
+}
+
+/// The state a LAPIC powers up in, and goes back to on INIT: software disabled,
+/// every LVT masked, nothing requested or in service, the timer stopped.
+pub fn reset(vcpu: *Vcpu) void {
+    vcpu.virt_lapic = @splat(0);
+    lapicReg(vcpu, apic_id).* = @as(u32, @truncate(vcpu.index)) << 24;
+    lapicReg(vcpu, version).* = 0x0005_0014; // version 0x14, maximum LVT index 5
+    lapicReg(vcpu, destination_format).* = 0xFFFF_FFFF; // flat model
+    lapicReg(vcpu, spurious_vector).* = 0x0000_00FF;
+    // 0x2F0 CMCI, 0x320 timer, 0x330 thermal, 0x340 perfmon, 0x350 LINT0, 0x360 LINT1, 0x370 error
+    for ([_]usize{ 0x2F0, 0x320, 0x330, 0x340, 0x350, 0x360, 0x370 }) |lvt|
+        lapicReg(vcpu, lvt).* = lvt_masked;
+    vcpu.lapic_timer_start_tsc = 0;
+    vcpu.lapic_timer_deadline_tsc = 0;
+}
+
+/// ID[31:24]
+pub fn apicId(vcpu: *Vcpu) u8 {
+    return @truncate(lapicReg(vcpu, apic_id).* >> 24);
+}
+
+/// What decides whether `vcpu`'s LAPIC is the destination of an IPI.
+pub fn ipiTarget(vcpu: *Vcpu) ipi.Target {
+    return .{
+        .apic_id = apicId(vcpu),
+        .logical_id = @truncate(lapicReg(vcpu, logical_destination).* >> 24),
+        .dfr_model = @truncate(lapicReg(vcpu, destination_format).* >> 28),
+    };
+}
+
+/// the interrupt command register as the guest last wrote it, both halves
+pub fn icr(vcpu: *Vcpu) ipi.Icr {
+    const high: u64 = lapicReg(vcpu, icr_high).*;
+    return @bitCast(high << 32 | lapicReg(vcpu, icr_low).*);
+}
+
+/// Requests `vector` in the IRR, as a fixed interrupt arriving at the LAPIC does.
+/// `Vcpu.prepareEntry` injects it once the guest's priority lets it through.
+pub fn raise(vcpu: *Vcpu, vector: u8) void {
+    setVector(vcpu, irr_base, vector);
 }
 
 fn softwareEnabled(vcpu: *Vcpu) bool {

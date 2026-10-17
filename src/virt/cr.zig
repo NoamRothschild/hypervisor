@@ -118,7 +118,7 @@ fn crPassthroughWrite(vcpu: *Vcpu, exit_qual: vmx.ExitQualification.Cr) error{Ab
     switch (exit_qual.index) {
         0 => {
             vmwrite(.CR0_READ_SHADOW, cr_val);
-            vmx.adjustCr0(&cr_val);
+            adjustGuestCr0(&cr_val);
             vmwrite(.GUEST_CR0, cr_val);
             updateIa32e();
         },
@@ -138,6 +138,27 @@ fn crPassthroughWrite(vcpu: *Vcpu, exit_qual: vmx.ExitQualification.Cr) error{Ab
         },
         else => return vcpu.abortMsg("unhandled write to CR{d}\n", .{exit_qual.index}),
     }
+}
+
+/// Applies the VMX fixed bits to a CR0 value the guest wrote, like `vmx.adjustCr0`,
+/// except PE and PG: unrestricted guest exempts them, and forcing them on would turn
+/// on paging under a guest still on its way out of real mode (an AP's trampoline).
+fn adjustGuestCr0(cr0: *u64) void {
+    const exempt: u64 = @bitCast(Cr0{
+        .pe = true,
+        .mp = false,
+        .em = false,
+        .ts = false,
+        .et = false,
+        .ne = false,
+        .wp = false,
+        .am = false,
+        .nw = false,
+        .cd = false,
+        .pg = true,
+    });
+    cr0.* |= msr.rdmsr(.IA32_VMX_CR0_FIXED0) & ~exempt;
+    cr0.* &= msr.rdmsr(.IA32_VMX_CR0_FIXED1);
 }
 
 /// Update IA-32e mode of the vCPU.

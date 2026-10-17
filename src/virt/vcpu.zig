@@ -49,11 +49,23 @@ pub const Vcpu = struct {
     /// `__vmEnter` loads them into the cpu, `__vmExit` stores them back.
     regs: Regs,
 
+    // guest state that VM entries and exits leave in the cpu, not the VMCS. only one
+    // vcpu's is in the cpu at a time, `Pcpu.load` swaps it (`saveCpuState`)
+    /// x87, MMX and SSE registers in the FXSAVE format. the hypervisor itself is built
+    /// without SSE, so they stay untouched between an exit and the next entry.
+    /// no XSAVE: CPUID hides it, so the guest only uses this much.
+    fpu: [512]u8 align(16),
+    /// the guest's last page fault address
+    cr2: u64,
+
     pub const State = enum {
+        /// not started yet: an AP waits for another vcpu's INIT-SIPI-SIPI
+        /// (`handleStartup`), the BSP for the guest OS loader (`start`). never entered
+        wait_for_sipi,
         /// entered whenever the scheduler picks it. a halted guest sleeps inside
         /// VMX non-root (the HLT activity state), so it is still runnable
         runnable,
-        /// not started yet (`start`), or stopped for good: aborted, faulted or shut down
+        /// stopped for good: aborted, faulted or shut down
         stopped,
     };
 
@@ -98,33 +110,67 @@ pub const Vcpu = struct {
     pub fn init(self: *Vcpu, vm: *vmx.VMState, index: usize) !void {
         self.vm = vm;
         self.index = index;
-        self.state = .stopped;
+        self.state = .wait_for_sipi;
         self.launched = false;
         self.regs = std.mem.zeroes(Regs);
         self.shadow_msrs = .{};
         self.pending_start = null;
-        self.virt_lapic = @splat(0);
-        self.lapic_timer_start_tsc = 0;
-        self.lapic_timer_deadline_tsc = 0;
-        {
-            // set ID in lapic
-            self.virt_lapic[0x20 / 4] = @as(u32, @truncate(index)) << 24;
-            // set VERSION in lapic
-            self.virt_lapic[0x30 / 4] = 0x0005_0014; // version 0x14, maximum LVT index 5
-            self.virt_lapic[0xE0 / 4] = 0xFFFF_FFFF;
-            self.virt_lapic[0xF0 / 4] = 0x0000_00FF;
-            // 0x2F0 CMCI, 0x320 timer, 0x330 thermal, 0x340 perfmon, 0x350 LINT0, 0x360 LINT1, 0x370 error
-            for (&[_]u32{ 0x2F0, 0x320, 0x330, 0x340, 0x350, 0x360, 0x370 }) |lvt|
-                self.virt_lapic[@divFloor(lvt, 4)] = 0x0001_0000;
-        }
+        lapic.reset(self);
+        self.cr2 = 0;
+        // the x87 and SSE state after reset (what FNINIT and a reset MXCSR leave)
+        self.fpu = @splat(0);
+        std.mem.writeInt(u16, self.fpu[0..2], 0x037f, .little); // FCW: every exception masked
+        std.mem.writeInt(u32, self.fpu[24..28], 0x1f80, .little); // MXCSR: every exception masked
 
         try self.allocVmcsRegion();
+    }
+
+    /// Stores the guest state the cpu holds outside the VMCS (see `fpu`) into the vcpu,
+    /// before another vcpu runs on this core.
+    pub fn saveCpuState(self: *Vcpu) void {
+        asm volatile ("fxsave64 (%[area])"
+            :
+            : [area] "r" (&self.fpu),
+            : .{ .memory = true });
+        self.cr2 = asm volatile ("mov %%cr2, %[cr2]"
+            : [cr2] "=r" (-> u64),
+        );
+    }
+
+    /// Loads what `saveCpuState` stored back into the cpu, before the vcpu runs again.
+    pub fn restoreCpuState(self: *Vcpu) void {
+        asm volatile ("fxrstor64 (%[area])"
+            :
+            : [area] "r" (&self.fpu),
+            : .{ .memory = true });
+        asm volatile ("mov %[cr2], %%cr2"
+            :
+            : [cr2] "r" (self.cr2),
+        );
     }
 
     /// makes the vcpu runnable, starting from `start_state` on its next entry
     pub fn start(self: *Vcpu, start_state: vmcs.GuestStart) void {
         self.pending_start = start_state;
         self.state = .runnable;
+    }
+
+    /// An INIT IPI arrived: the vcpu stops wherever it was, its LAPIC resets, and it
+    /// waits for a startup IPI. Only software state changes, the VMCS isn't touched
+    /// until a SIPI gives the vcpu a new start state.
+    pub fn handleInit(self: *Vcpu) void {
+        if (self.state == .stopped) return;
+        lapic.reset(self);
+        self.pending_start = null;
+        self.state = .wait_for_sipi;
+    }
+
+    /// A startup IPI arrived: a vcpu waiting for one starts in real mode at
+    /// `vector` << 12. Any other vcpu ignores it, as Linux's second SIPI expects.
+    pub fn handleStartup(self: *Vcpu, vector: u8) void {
+        if (self.state != .wait_for_sipi) return;
+        self.regs = std.mem.zeroes(Regs);
+        self.start(.{ .real_mode = .{ .vector = vector } });
     }
 
     /// Prepares the VMCS region. `vmclear()` and `vmptrld()` activate it, after `Pcpu.init`.
@@ -491,10 +537,11 @@ pub const Vcpu = struct {
     }
 
     /// Handles the VM-exit that just happened, so the next entry resumes the guest
-    /// where it should. Stops the vcpu if the guest can't continue.
+    /// where it should. Stops the VM if the guest can't continue.
     pub fn handleExit(self: *Vcpu) void {
         switch (self.exitAction()) {
-            .exit => self.state = .stopped,
+            // the other vcpus would wait on this one forever, so they stop with it
+            .exit => self.vm.stop(),
             .@"resume" => resumeToNextInstruction(),
             .resume_at_rip => {},
         }
@@ -650,7 +697,7 @@ const ActivityState = enum(u64) {
 pub const ExitAction = enum {
     /// advance RIP past the exiting instruction, then resume the guest
     @"resume",
-    /// stop the vcpu, the scheduler never enters it again
+    /// stop the VM, the scheduler never enters its vcpus again
     exit,
     /// resume the guest at GUEST_RIP as is, for handlers that set RIP themselves (e.g. an emulated IRET)
     resume_at_rip,

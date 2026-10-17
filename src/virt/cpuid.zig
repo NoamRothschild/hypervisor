@@ -133,6 +133,12 @@ pub fn cpuid(vcpu: *Vcpu) error{Aborted}!void {
     const guest_regs = &vcpu.regs;
     const leaf: u32 = @truncate(guest_regs.rax);
     const subleaf: u32 = @truncate(guest_regs.rcx);
+    // CPUID writes all four as 32-bit registers, in 64-bit mode their upper halves
+    // become 0. the leaves below only fill in the lower halves
+    guest_regs.rax = 0;
+    guest_regs.rbx = 0;
+    guest_regs.rcx = 0;
+    guest_regs.rdx = 0;
 
     switch (Leaf.from(leaf)) {
         .maximum_input => {
@@ -192,13 +198,13 @@ pub fn cpuid(vcpu: *Vcpu) error{Aborted}!void {
                     guest_regs.edx().* = 0; // unimplemented
                 },
                 1, 2 => invalid(vcpu),
-                else => try vcpu.abortMsg("Unhandled CPUID: Leaf=0x{X:0>8}, Sub=0x{X:0>8}\n", .{ guest_regs.rax, guest_regs.rcx }),
+                else => try vcpu.abortMsg("Unhandled CPUID: Leaf=0x{X:0>8}, Sub=0x{X:0>8}\n", .{ leaf, subleaf }),
             }
         },
         .ext_enumeration => {
             switch (subleaf) {
                 1 => invalid(vcpu),
-                else => try vcpu.abortMsg("Unhandled CPUID: Leaf=0x{X:0>8}, Sub=0x{X:0>8}\n", .{ guest_regs.rax, guest_regs.rcx }),
+                else => try vcpu.abortMsg("Unhandled CPUID: Leaf=0x{X:0>8}, Sub=0x{X:0>8}\n", .{ leaf, subleaf }),
             }
         },
         .tsc_crystal => {
@@ -231,7 +237,7 @@ pub fn cpuid(vcpu: *Vcpu) error{Aborted}!void {
                 invalid(vcpu);
                 return;
             }
-            std.log.warn("Unhandled CPUID: Leaf=0x{X:0>8}, Sub=0x{X:0>8}\n", .{ guest_regs.rax, guest_regs.rcx });
+            std.log.warn("Unhandled CPUID: Leaf=0x{X:0>8}, Sub=0x{X:0>8}\n", .{ leaf, subleaf });
             invalid(vcpu);
         },
     }

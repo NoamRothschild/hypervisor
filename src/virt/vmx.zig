@@ -148,6 +148,11 @@ pub const VMState = struct {
             try pcpu.add(vcpu);
         }
     }
+
+    /// stops every vcpu for good, the scheduler never enters them again
+    pub fn stop(self: *VMState) void {
+        for (self.cpus) |*vcpu| vcpu.state = .stopped;
+    }
 };
 
 pub fn vmxoff() void {

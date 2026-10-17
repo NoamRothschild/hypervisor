@@ -101,8 +101,10 @@ pub fn rdmsr(vcpu: *Vcpu) error{Aborted}!void {
         else => return vcpu.abortMsg("Unhandled RDMSR for {s}\n", .{@tagName(msr_kind)}),
     };
 
-    guest_regs.edx().* = @truncate(val >> 32);
-    guest_regs.eax().* = @truncate(val);
+    // RDMSR writes EDX:EAX, which in 64-bit mode zeroes the upper halves of RDX and RAX.
+    // Linux reads the full registers (`rdmsrq`), stale upper halves leak into the value.
+    guest_regs.rdx = val >> 32;
+    guest_regs.rax = val & 0xffff_ffff;
 }
 
 pub fn wrmsr(vcpu: *Vcpu) error{Aborted}!void {
