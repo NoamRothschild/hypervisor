@@ -10,12 +10,9 @@ const kalloc = &@import("../mem/allocator.zig").kalloc;
 
 const address = @import("../mem/address.zig");
 
-/// physical address in the host's address space
 pub const HostPhys = address.HostPhys;
-/// physical address in the guest's address space, translated by EPT
-pub const GuestPhys = address.Address(.guest_phys, .{});
-/// virtual address in the guest's address space, translated by the guest's own page tables
-pub const GuestVirt = address.Address(.guest_virt, .{});
+pub const GuestPhys = address.GuestPhys;
+pub const GuestVirt = address.GuestVirt;
 
 /// EPT pointer
 pub const EPTP = packed struct(u64) {
@@ -52,7 +49,7 @@ pub const EPT_PML4E = packed struct(u64) {
             .execute = 1,
             .accessed = 0,
             .exec_for_usermode = 0,
-            .phys_addr = @truncate(phys_addr.raw() >> 12),
+            .phys_addr = @truncate(phys_addr >> 12),
         };
     }
 
@@ -74,7 +71,7 @@ pub const EPT_PML4E = packed struct(u64) {
     }
 
     pub inline fn physAddr(self: *const @This()) HostPhys {
-        return .from(@as(u64, self.phys_addr) << 12);
+        return @as(u64, self.phys_addr) << 12;
     }
 };
 
@@ -106,7 +103,7 @@ pub const EPT_PDPTE = packed union(u64) {
         }
 
         pub inline fn physAddr(self: *const @This()) HostPhys {
-            return .from(@as(u64, self.phys_addr) << 12);
+            return @as(u64, self.phys_addr) << 12;
         }
     },
     @"1 GB": packed struct(u64) {
@@ -143,14 +140,14 @@ pub const EPT_PDPTE = packed union(u64) {
         }
 
         pub inline fn physAddr(self: *const @This()) HostPhys {
-            return .from(@as(u64, self.phys_addr) << 30);
+            return @as(u64, self.phys_addr) << 30;
         }
     },
 
     pub fn makeEntry(comptime tag: enum { PD, @"1 GB" }, phys_addr: HostPhys) @This() {
         return switch (tag) {
-            .PD => .{ .PD = .makeEntry(@truncate(phys_addr.raw() >> 12)) },
-            .@"1 GB" => .{ .@"1 GB" = .makeEntry(@truncate(phys_addr.raw() >> 30)) },
+            .PD => .{ .PD = .makeEntry(@truncate(phys_addr >> 12)) },
+            .@"1 GB" => .{ .@"1 GB" = .makeEntry(@truncate(phys_addr >> 30)) },
         };
     }
 
@@ -207,7 +204,7 @@ pub const EPT_PDE = packed union(u64) {
         }
 
         pub inline fn physAddr(self: *const @This()) HostPhys {
-            return .from(@as(u64, self.phys_addr) << 12);
+            return @as(u64, self.phys_addr) << 12;
         }
     },
     @"2 MB": packed struct(u64) {
@@ -244,14 +241,14 @@ pub const EPT_PDE = packed union(u64) {
         }
 
         pub inline fn physAddr(self: *const @This()) HostPhys {
-            return .from(@as(u64, self.phys_addr) << 21);
+            return @as(u64, self.phys_addr) << 21;
         }
     },
 
     pub fn makeEntry(comptime tag: enum { PT, @"2 MB" }, phys_addr: HostPhys) @This() {
         return switch (tag) {
-            .PT => .{ .PT = .makeEntry(@truncate(phys_addr.raw() >> 12)) },
-            .@"2 MB" => .{ .@"2 MB" = .makeEntry(@truncate(phys_addr.raw() >> 21)) },
+            .PT => .{ .PT = .makeEntry(@truncate(phys_addr >> 12)) },
+            .@"2 MB" => .{ .@"2 MB" = .makeEntry(@truncate(phys_addr >> 21)) },
         };
     }
 
@@ -307,7 +304,7 @@ pub const EPT_PTE = packed struct(u64) {
             .accessed = 0,
             .dirty = 0,
             .exec_for_usermode = 0,
-            .phys_addr = @truncate(phys_addr.raw() >> 12),
+            .phys_addr = @truncate(phys_addr >> 12),
             .supress_ve = 0,
         };
     }
@@ -330,7 +327,7 @@ pub const EPT_PTE = packed struct(u64) {
     }
 
     pub inline fn physAddr(self: *const @This()) HostPhys {
-        return .from(@as(u64, self.phys_addr) << 12);
+        return @as(u64, self.phys_addr) << 12;
     }
 };
 
@@ -347,14 +344,14 @@ const HugePage = [1 << 30]u8;
 const HugePagePtr = *align(0x1000) HugePage;
 
 /// Guest physical 3GB-4GB holds no RAM and is left unmapped for device MMIO.
-pub const mmio_hole_start: GuestPhys = .from(3 << 30);
-pub const mmio_hole_end: GuestPhys = .from(4 << 30);
+pub const mmio_hole_start: GuestPhys = 3 << 30;
+pub const mmio_hole_end: GuestPhys = 4 << 30;
 /// the 1GB slot of guest physical memory taken by the hole
-const hole_slot = mmio_hole_start.raw() >> 30;
+const hole_slot = mmio_hole_start >> 30;
 
 comptime {
     // the RAM block <-> slot translation assumes the hole is exactly one 1GB slot
-    std.debug.assert(mmio_hole_end.raw() - mmio_hole_start.raw() == 1 << 30);
+    std.debug.assert(mmio_hole_end - mmio_hole_start == 1 << 30);
 }
 
 /// The 1GB slot of guest physical memory RAM block `i` is mapped at.
@@ -435,23 +432,23 @@ pub fn init(guest_state: *vmx.VMState, guest_allocator: *GuestAllocator, block_c
     }
 
     initGuestPageTables(first_block, block_count);
-    guest_state.guest_cr3 = .from(guest_pml4_gpa);
+    guest_state.guest_cr3 = guest_pml4_gpa;
     std.log.info("EPT ptr stored inside guest_state\n", .{});
 
     return EPTP{
         .dirty_access_enabled = caps.dirty_access_flags,
         .memory_type = 6, // Write Back
         .page_walk_length = 4 - 1, // 4 tables walked
-        .pml4_addr = @truncate(hhdm.physOf(pml4).raw() >> 12),
+        .pml4_addr = @truncate(hhdm.physOf(pml4) >> 12),
     };
 }
 
 /// translates a guest-physical address to a pointer into the guest's RAM.
 pub fn guestPhysToHostVirt(guest_state: *vmx.VMState, guest_phys: GuestPhys, must_4k_align: bool) !*u8 {
-    const inner_offset: usize = @rem(guest_phys.raw(), (1 << 30));
+    const inner_offset: usize = @rem(guest_phys, (1 << 30));
     if (must_4k_align and inner_offset & ((1 << 12) - 1) != 0)
         return error.Non4KAlignedPageTableEntry;
-    const huge_page_idx = blockOf(guest_state, guest_phys.raw()) orelse
+    const huge_page_idx = blockOf(guest_state, guest_phys) orelse
         return error.OOBRamAddr;
 
     const page_ptr = guest_state.guest_mem_pages[huge_page_idx];
@@ -459,38 +456,37 @@ pub fn guestPhysToHostVirt(guest_state: *vmx.VMState, guest_phys: GuestPhys, mus
 }
 
 /// walks the guest's current 4-level page tables
-pub fn guestVirtToHostVirt(guest_state: *vmx.VMState, guest_cr3: GuestPhys, vaddr: GuestVirt) !*u8 {
-    const va = vaddr.raw();
+pub fn guestVirtToHostVirt(guest_state: *vmx.VMState, guest_cr3: GuestPhys, va: GuestVirt) !*u8 {
     const pml4_idx: usize = (va >> 39) & 0x1ff;
     const pdpt_idx: usize = (va >> 30) & 0x1ff;
     const pd_idx: usize = (va >> 21) & 0x1ff;
     const pt_idx: usize = (va >> 12) & 0x1ff;
 
     // the low 12 bits hold the PCID when CR4.PCIDE=1, and bit 63 is the no-flush flag
-    const cr3_masked: GuestPhys = .from(guest_cr3.raw() & 0x000f_ffff_ffff_f000);
+    const cr3_masked: GuestPhys = guest_cr3 & 0x000f_ffff_ffff_f000;
     const pml4: *[512]paging.PML4E = @ptrCast(@alignCast(try guestPhysToHostVirt(guest_state, cr3_masked, true)));
     const pml4e: *paging.PML4E = &pml4.*[pml4_idx];
     if (!pml4e.present()) return error.AddressUnmapped;
 
-    const pdpt: *[512]paging.PDPTE = @ptrCast(@alignCast(try guestPhysToHostVirt(guest_state, .from(pml4e.physAddr()), true)));
+    const pdpt: *[512]paging.PDPTE = @ptrCast(@alignCast(try guestPhysToHostVirt(guest_state, pml4e.physAddr(), true)));
     const pdpte: *paging.PDPTE = &pdpt.*[pdpt_idx];
     if (!pdpte.present()) return error.AddressUnmapped;
 
     if (pdpte.@"1 GB".ps == 1)
-        return guestPhysToHostVirt(guest_state, .from(pdpte.physAddr(.@"1 GB") | (va & 0x3fff_ffff)), false);
+        return guestPhysToHostVirt(guest_state, pdpte.physAddr(.@"1 GB") | (va & 0x3fff_ffff), false);
 
-    const pd: *[512]paging.PDE = @ptrCast(@alignCast(try guestPhysToHostVirt(guest_state, .from(pdpte.physAddr(.PD)), true)));
+    const pd: *[512]paging.PDE = @ptrCast(@alignCast(try guestPhysToHostVirt(guest_state, pdpte.physAddr(.PD), true)));
     const pde: *paging.PDE = &pd.*[pd_idx];
     if (!pde.present()) return error.AddressUnmapped;
 
     if (pde.@"2 MB".ps == 1)
-        return guestPhysToHostVirt(guest_state, .from(pde.physAddr(.@"2 MB") | (va & 0x1f_ffff)), false);
+        return guestPhysToHostVirt(guest_state, pde.physAddr(.@"2 MB") | (va & 0x1f_ffff), false);
 
-    const pt: *[512]paging.PTE = @ptrCast(@alignCast(try guestPhysToHostVirt(guest_state, .from(pde.physAddr(.PT)), true)));
+    const pt: *[512]paging.PTE = @ptrCast(@alignCast(try guestPhysToHostVirt(guest_state, pde.physAddr(.PT), true)));
     const pte: *paging.PTE = &pt.*[pt_idx];
     if (!pte.present()) return error.AddressUnmapped;
 
-    return guestPhysToHostVirt(guest_state, .from(pte.physAddr() | (va & 0xfff)), false);
+    return guestPhysToHostVirt(guest_state, pte.physAddr() | (va & 0xfff), false);
 }
 
 pub const InvEptDescriptor = packed struct(u128) {
@@ -520,13 +516,13 @@ pub fn invept(invept_type: InvEptType, eptp: EPTP) void {
 /// copies a `T` out of guest-physical memory.
 /// handles unaligned addresses and values that straddle a page boundary.
 pub fn readGuestPhys(comptime T: type, guest_state: *vmx.VMState, gpa: GuestPhys) !T {
-    return readGuest(T, guest_state, gpa.raw(), null);
+    return readGuest(T, guest_state, gpa, null);
 }
 
 /// copies a `T` out of guest-virtual memory, walking the page tables at `guest_cr3`.
 /// handles unaligned addresses and values that straddle a page boundary.
 pub fn readGuestVirt(comptime T: type, guest_state: *vmx.VMState, guest_cr3: GuestPhys, gva: GuestVirt) !T {
-    return readGuest(T, guest_state, gva.raw(), guest_cr3);
+    return readGuest(T, guest_state, gva, guest_cr3);
 }
 
 /// `base_addr` is a `GuestVirt` when `cr3_if_virt` is set, and a `GuestPhys` otherwise.
@@ -537,9 +533,9 @@ fn readGuest(comptime T: type, guest_state: *vmx.VMState, base_addr: u64, cr3_if
         const addr = base_addr +% done;
         const n = @min(bytes.len - done, 0x1000 - (addr & 0xfff));
         const src: [*]const u8 = @ptrCast(if (cr3_if_virt) |cr3|
-            try guestVirtToHostVirt(guest_state, cr3, .from(addr))
+            try guestVirtToHostVirt(guest_state, cr3, addr)
         else
-            try guestPhysToHostVirt(guest_state, .from(addr), false));
+            try guestPhysToHostVirt(guest_state, addr, false));
         @memcpy(bytes[done..][0..n], src[0..n]);
         done += n;
     }
@@ -548,8 +544,7 @@ fn readGuest(comptime T: type, guest_state: *vmx.VMState, base_addr: u64, cr3_if
 
 /// loads an image into the guest mem at addr `base_addr`
 /// `base_addr` range is [0, total_mem_available]
-pub fn writeGuest(guest_state: *vmx.VMState, image: []const u8, guest_base: GuestPhys) error{OutOfMemory}!void {
-    const base_addr = guest_base.raw();
+pub fn writeGuest(guest_state: *vmx.VMState, image: []const u8, base_addr: GuestPhys) error{OutOfMemory}!void {
     if (!isRam(guest_state, base_addr, image.len))
         return error.OutOfMemory;
 
@@ -566,8 +561,7 @@ pub fn writeGuest(guest_state: *vmx.VMState, image: []const u8, guest_base: Gues
 
 /// FIXME: edgecases of OOB not properly tested
 /// `base_addr` range is [0, total_mem_available]
-pub fn memsetGuest(guest_state: *vmx.VMState, value: u8, guest_base: GuestPhys, len: usize) !void {
-    const base_addr = guest_base.raw();
+pub fn memsetGuest(guest_state: *vmx.VMState, value: u8, base_addr: GuestPhys, len: usize) !void {
     if (!isRam(guest_state, base_addr, len))
         return error.OutOfMemory;
     var done: usize = 0;

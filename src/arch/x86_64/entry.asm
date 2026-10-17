@@ -62,6 +62,7 @@ section .text.boot exec alloc
 PTE_SIZE equ ENTRY_BYTE_SIZE
 
 PT_ADDR_MASK equ 0xffffffffff000
+PT_ADDR_MASK_32 equ PT_ADDR_MASK & 0xffffffff
 PT_PRESENT equ 1
 PT_READABLE equ 2
 PAGE_SIZE equ 0x1000
@@ -98,25 +99,25 @@ _start:
 
   mov edi, PML4T
   mov eax, PDPT
-  and eax, PT_ADDR_MASK
+  and eax, PT_ADDR_MASK_32
   or eax, PT_PRESENT | PT_READABLE
   mov dword [edi], eax
 
   mov edi, PDPT
   mov eax, PDT
-  and eax, PT_ADDR_MASK
+  and eax, PT_ADDR_MASK_32
   or eax, PT_PRESENT | PT_READABLE
   mov dword [edi], eax
 
   mov edi, PDT
   mov eax, PT1
-  and eax, PT_ADDR_MASK
+  and eax, PT_ADDR_MASK_32
   or eax, PT_PRESENT | PT_READABLE
   mov dword [edi], eax
 
   mov edi, PDT + ENTRY_BYTE_SIZE
   mov eax, PT2
-  and eax, PT_ADDR_MASK
+  and eax, PT_ADDR_MASK_32
   or eax, PT_PRESENT | PT_READABLE
   mov dword [edi], eax
 

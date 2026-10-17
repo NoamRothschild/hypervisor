@@ -76,18 +76,18 @@ pub fn load(dst_guest: *vmx.VMState) !void {
     // base memory, up to the MP tables in its last KB
     bp.addE820Entry(.{
         .addr = 0,
-        .size = mptable.base.raw(),
+        .size = mptable.base,
         .type = .ram,
     });
     // the MP tables, and the VGA/BIOS hole up to 1MB, as on a PC
     bp.addE820Entry(.{
-        .addr = mptable.base.raw(),
-        .size = layout.kernel_base - mptable.base.raw(),
+        .addr = mptable.base,
+        .size = layout.kernel_base - mptable.base,
         .type = .reserved,
     });
     // RAM up to the MMIO hole, the rest of it is above the hole, see `ept.mmio_hole_start`
     const block_count = dst_guest.guest_mem_pages.len;
-    const low_blocks: usize = @min(block_count, ept.mmio_hole_start.raw() >> 30);
+    const low_blocks: usize = @min(block_count, ept.mmio_hole_start >> 30);
     bp.addE820Entry(.{
         .addr = layout.kernel_base,
         .size = (1 << 30) * low_blocks - layout.kernel_base,
@@ -95,7 +95,7 @@ pub fn load(dst_guest: *vmx.VMState) !void {
     });
     if (block_count > low_blocks) {
         bp.addE820Entry(.{
-            .addr = ept.mmio_hole_end.raw(),
+            .addr = ept.mmio_hole_end,
             .size = (1 << 30) * (block_count - low_blocks),
             .type = .ram,
         });
@@ -108,10 +108,10 @@ pub fn load(dst_guest: *vmx.VMState) !void {
         std.log.err("provided guest cmdline too long!", .{});
         return err;
     };
-    try ept.writeGuest(dst_guest, cmdline_val[0..], .from(layout.cmdline));
+    try ept.writeGuest(dst_guest, cmdline_val[0..], layout.cmdline);
 
     const guest_gdt = gdt32.flatProtectedMode();
-    try ept.writeGuest(dst_guest, std.mem.asBytes(&guest_gdt), .from(layout.gdt));
+    try ept.writeGuest(dst_guest, std.mem.asBytes(&guest_gdt), layout.gdt);
 
     // the BSP enters the kernel, the APs wait for the kernel to start them
     const bsp = &dst_guest.cpus[0];
@@ -119,25 +119,27 @@ pub fn load(dst_guest: *vmx.VMState) !void {
     // and edi must be zero
     bsp.regs = std.mem.zeroes(@TypeOf(bsp.regs));
     bsp.regs.rsi = layout.bootparam;
-    bsp.start(.{ .protected32 = .{
-        .rip = layout.kernel_base,
-        // top of the RAM below the MMIO hole, so the stack is RAM even for a 32-bit guest
-        .rsp = @intCast((1 << 30) * low_blocks),
-        .gdtr_base = layout.gdt,
-        .gdtr_limit = @sizeOf(@TypeOf(guest_gdt)) - 1,
-    } });
+    bsp.start(.{
+        .protected32 = .{
+            .rip = layout.kernel_base,
+            // top of the RAM below the MMIO hole, so the stack is RAM even for a 32-bit guest
+            .rsp = @intCast((1 << 30) * low_blocks),
+            .gdtr_base = layout.gdt,
+            .gdtr_limit = @sizeOf(@TypeOf(guest_gdt)) - 1,
+        },
+    });
 
     const code_offset = bp.hdr.protectedCodeOffset();
     const code_size = img.len - code_offset;
-    try ept.writeGuest(dst_guest, std.mem.asBytes(&bp), .from(layout.bootparam));
+    try ept.writeGuest(dst_guest, std.mem.asBytes(&bp), layout.bootparam);
     try ept.writeGuest(
         dst_guest,
         img[code_offset .. code_offset + code_size],
-        .from(layout.kernel_base),
+        layout.kernel_base,
     );
     try ept.writeGuest(
         dst_guest,
         rootfs_raw,
-        .from(layout.initrd),
+        layout.initrd,
     );
 }

@@ -4,6 +4,10 @@ const std = @import("std");
 fn addNasmFile(b: *std.Build, kernel: *std.Build.Step.Compile, source_path: []const u8, name: []const u8) void {
     const output_path = b.fmt("zig-out/bin/{s}.o", .{name});
 
+    // on first run `zig-out/bin` does not exist and then nasm fails to store the file there
+    b.build_root.handle.createDirPath(b.graph.io, std.fs.path.dirname(output_path).?) catch |err|
+        std.debug.panic("unable to create {s}: {t}", .{ std.fs.path.dirname(output_path).?, err });
+
     const nasm_command = b.addSystemCommand(&[_][]const u8{
         "nasm",
         "-f",

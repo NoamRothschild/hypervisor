@@ -42,11 +42,11 @@ pub const tsc_per_bus_cycle = 16;
 
 pub fn eptViolation(vcpu: *Vcpu, violating_addr: ept.GuestPhys) error{Aborted}!void {
     const guest_addr = vmread(.GUEST_RIP);
-    const offset = violating_addr.raw() - lapic_base;
+    const offset = violating_addr - lapic_base;
     const lapic_index: u64 = @divFloor(offset, 4);
 
     const mmio_instr = instr_decoder.decodeGuestRip(vcpu) catch |err| {
-        const bytes = ept.readGuestVirt([instr_decoder.max_len]u8, vcpu.vm, .from(vmread(.GUEST_CR3)), .from(guest_addr)) catch return error.Aborted;
+        const bytes = ept.readGuestVirt([instr_decoder.max_len]u8, vcpu.vm, vmread(.GUEST_CR3), guest_addr) catch return error.Aborted;
         return vcpu.abortMsg("failed to decode instr that caused EPT violation: {s}\nistr bytes: {any}\n", .{ @errorName(err), bytes[0..] });
     };
     defer vmwrite(.GUEST_RIP, vmread(.GUEST_RIP) +% mmio_instr.len);

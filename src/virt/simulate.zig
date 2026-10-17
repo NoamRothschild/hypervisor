@@ -16,9 +16,9 @@ pub const handleIo = @import("io.zig").handleIo;
 pub fn pop(comptime T: type, guest_state: *vmx.VMState, cr3_if_virt: ?ept.GuestPhys) !T {
     const rsp = vmread(.GUEST_RSP);
     const value = if (cr3_if_virt) |cr3|
-        try ept.readGuestVirt(T, guest_state, cr3, .from(rsp))
+        try ept.readGuestVirt(T, guest_state, cr3, rsp)
     else
-        try ept.readGuestPhys(T, guest_state, .from(rsp));
+        try ept.readGuestPhys(T, guest_state, rsp);
     vmwrite(.GUEST_RSP, rsp +% 8);
     return value;
 }

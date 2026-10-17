@@ -11,20 +11,19 @@ const assert = std.debug.assert;
 
 const hypervisor_sig = @import("../cpuid.zig").hypervisor_sig;
 
-/// A guest physical address, as the MP tables store them.
-pub const GuestPhys32 = address.Address(.guest_phys, .{ .backing = u32 });
+pub const GuestPhys32 = address.GuestPhys32;
 
 /// Where the tables are written: the last kilobyte of base memory (639KB),
 /// one of the places Linux scans for the floating pointer.
 /// Must be left out of the guest's E820 RAM.
-pub const base: GuestPhys32 = .from(0x9_FC00);
+pub const base: GuestPhys32 = 0x9_FC00;
 /// Bytes available at `base`, up to the start of the VGA hole (0xA0000).
-pub const max_size = 0xA_0000 - base.raw();
+pub const max_size = 0xA_0000 - base;
 
 /// Local APIC MMIO base. source: linux/arch/x86/include/asm/apicdef.h
-pub const lapic_base: GuestPhys32 = .from(0xFEE0_0000);
+pub const lapic_base: GuestPhys32 = 0xFEE0_0000;
 /// I/O APIC MMIO base. source: linux/arch/x86/include/asm/apicdef.h
-pub const ioapic_base: GuestPhys32 = .from(0xFEC0_0000);
+pub const ioapic_base: GuestPhys32 = 0xFEC0_0000;
 /// Local APIC version reported for every CPU (and the I/O APIC), as an integrated 82489DX successor.
 const apic_version = 0x14;
 /// Number of legacy ISA IRQs routed to the I/O APIC.
@@ -40,7 +39,7 @@ const isa_irq_count = 16;
 pub const FloatingPointer = extern struct {
     sig: [4]u8 = "_MP_".*,
     /// ptr to the mp config table, or null if does not exist, see `ConfigTable`
-    config_table: GuestPhys32 = .null,
+    config_table: GuestPhys32 = 0,
     /// length of this struct in paragraph (16-byte) units.
     len: u8 = 1,
     /// The version number of the MP specification supported.
@@ -69,7 +68,7 @@ pub const ConfigTable = extern struct {
     checksum: u8 = 0,
     oem_id: [8]u8 = "NoamRTD ".*,
     product_id: [12]u8 = hypervisor_sig.*,
-    oem_table_ptr: GuestPhys32 = .null,
+    oem_table_ptr: GuestPhys32 = 0,
     oem_table_size: u16 = 0,
     entry_count: u16,
     lapic_addr: GuestPhys32 = lapic_base,
@@ -291,7 +290,7 @@ pub fn build(buf: []u8, at: GuestPhys32, opts: Options) error{ NoCpus, TooManyCp
     };
 
     var b: Builder = .{ .buf = buf };
-    b.extendAny(FloatingPointer{ .config_table = at.offset(@sizeOf(FloatingPointer)) });
+    b.extendAny(FloatingPointer{ .config_table = at + @sizeOf(FloatingPointer) });
     const table_start = b.len;
 
     // filled in once the entries are counted
@@ -359,7 +358,7 @@ pub fn build(buf: []u8, at: GuestPhys32, opts: Options) error{ NoCpus, TooManyCp
 pub fn write(guest_state: *vmx.VMState, opts: Options) !void {
     var buf: [max_size]u8 = undefined;
     const tables = try build(&buf, base, opts);
-    try ept.writeGuest(guest_state, tables, .from(base.raw()));
+    try ept.writeGuest(guest_state, tables, base);
 }
 
 test "build: layout and checksums" {
@@ -369,7 +368,7 @@ test "build: layout and checksums" {
 
     const fp: *align(1) const FloatingPointer = @ptrCast(tables.ptr);
     try std.testing.expectEqualSlices(u8, "_MP_", &fp.sig);
-    try std.testing.expectEqual(base.raw() + 16, fp.config_table.raw());
+    try std.testing.expectEqual(base + 16, fp.config_table);
     try std.testing.expectEqual(0, checksum(tables[0..16]));
 
     const table = tables[16..];

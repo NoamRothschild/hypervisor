@@ -137,9 +137,9 @@ pub fn setup(vcpu: *Vcpu, kalloc: *KAlloc, eptp: ept.EPTP) !void {
     vmwrite(.HOST_IDTR_BASE, idt.idt_descriptor.base);
     vmwrite(.HOST_GDTR_BASE, gdt_info.base);
 
-    vmwrite(.MSR_BITMAP, vcpu.vm.msr_bitmap_phys.raw());
-    vmwrite(.IO_BITMAP_A, hhdm.physOf(vcpu.vm.io_bitmap.first).raw());
-    vmwrite(.IO_BITMAP_B, hhdm.physOf(vcpu.vm.io_bitmap.second).raw());
+    vmwrite(.MSR_BITMAP, vcpu.vm.msr_bitmap_phys);
+    vmwrite(.IO_BITMAP_A, hhdm.physOf(vcpu.vm.io_bitmap.first));
+    vmwrite(.IO_BITMAP_B, hhdm.physOf(vcpu.vm.io_bitmap.second));
     try vcpu.setupMsrs(kalloc);
 
     vmwrite(.GUEST_SYSENTER_CS, rdmsr(.IA32_SYSENTER_CS));

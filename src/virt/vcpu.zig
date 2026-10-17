@@ -179,7 +179,7 @@ pub const Vcpu = struct {
         const vmcs_region_phys = hhdm.physOf(vmcs_page);
 
         std.log.info("virtual buff addr for VMCS at 0x{x}\n", .{@intFromPtr(vmcs_page)});
-        std.log.info("physical buff addr for VMCS at 0x{x}\n", .{vmcs_region_phys.raw()});
+        std.log.info("physical buff addr for VMCS at 0x{x}\n", .{vmcs_region_phys});
 
         @memset(vmcs_page, 0);
         @as(*volatile u32, @ptrCast(vmcs_page)).* = vmx.revisionIdentifier();
@@ -266,11 +266,11 @@ pub const Vcpu = struct {
         gm.set(.SYSCALL_MASK, 0);
         gm.set(.KERNEL_GS_BASE, 0);
 
-        const hm_low: u32 = @truncate(hm.phys().raw());
-        const hm_high: u32 = @truncate(hm.phys().raw() >> 32);
+        const hm_low: u32 = @truncate(hm.phys());
+        const hm_high: u32 = @truncate(hm.phys() >> 32);
 
-        const gm_low: u32 = @truncate(gm.phys().raw());
-        const gm_high: u32 = @truncate(gm.phys().raw() >> 32);
+        const gm_low: u32 = @truncate(gm.phys());
+        const gm_high: u32 = @truncate(gm.phys() >> 32);
 
         vmwrite(.VM_EXIT_MSR_LOAD_ADDR, hm_low);
         vmwrite(.VM_EXIT_MSR_STORE_ADDR, gm_low);
@@ -319,8 +319,8 @@ pub const Vcpu = struct {
             => {},
 
             .ept_violation => {
-                const violating_addr: ept.GuestPhys = .from(vmread(.GUEST_PHYSICAL_ADDRESS));
-                switch (violating_addr.raw()) {
+                const violating_addr: ept.GuestPhys = vmread(.GUEST_PHYSICAL_ADDRESS);
+                switch (violating_addr) {
                     0xfee00000...0xfee00fff => try lapic.eptViolation(self, violating_addr),
                     else => try self.abort(),
                 }

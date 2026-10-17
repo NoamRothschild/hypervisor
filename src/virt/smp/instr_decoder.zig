@@ -23,7 +23,7 @@ pub const max_len = 15;
 /// decodes the instr at the loaded guest's RIP
 pub fn decodeGuestRip(vcpu: *Vcpu) !MmioInstr {
     const guest_addr = vmx.vmread(.GUEST_RIP);
-    const bytes = try ept.readGuestVirt([max_len]u8, vcpu.vm, .from(vmx.vmread(.GUEST_CR3)), .from(guest_addr));
+    const bytes = try ept.readGuestVirt([max_len]u8, vcpu.vm, vmx.vmread(.GUEST_CR3), guest_addr);
     return decode(bytes[0..]);
 }
 

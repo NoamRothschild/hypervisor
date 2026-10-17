@@ -37,8 +37,8 @@ pub const KAlloc = struct {
     /// anything empty. Overflowing the array would silently hand reserved
     /// memory to the allocator, so it is fatal.
     fn addRange(list: *[max_reserved_ranges]Range, count: *usize, start: PhysAddr, len: u64, limit: u64) void {
-        const s = @min(start.raw(), limit);
-        const e = @min(start.raw() +| len, limit);
+        const s = @min(start, limit);
+        const e = @min(start +| len, limit);
         if (e <= s) return;
 
         if (count.* == list.len)
@@ -51,7 +51,7 @@ pub const KAlloc = struct {
     /// Initializes `self` in place -- the page pool keeps a pointer to
     /// `self.fla`, so a `KAlloc` must not be moved once initialized.
     pub fn init(self: *KAlloc) void {
-        const buf = hhdm.virtOf(*[1 << 30]u8, .from(0));
+        const buf = hhdm.virtOf(*[1 << 30]u8, 0);
         self.* = .{
             .fla = .init(@alignCast(buf), .first_fit),
             .pages = undefined,
@@ -67,7 +67,7 @@ pub const KAlloc = struct {
 
         // everything `paging`'s boot-time bump allocator has already handed
         // out, kernel image included
-        addRange(&ranges, &range_count, .from(0), paging.bumpBoundary().raw(), buf.len);
+        addRange(&ranges, &range_count, 0, paging.bumpBoundary(), buf.len);
 
         // the multiboot info struct sits wherever GRUB dropped it, which is
         // regularly inside this region and past bumpBoundary().
@@ -81,7 +81,7 @@ pub const KAlloc = struct {
                 break;
 
             if (entry.type != .mem_available)
-                addRange(&ranges, &range_count, .from(entry.addr), entry.len, buf.len);
+                addRange(&ranges, &range_count, entry.addr, entry.len, buf.len);
         }
 
         var tags: mbt2.TagIterator = .init();
@@ -89,7 +89,7 @@ pub const KAlloc = struct {
             if (tag.type != .module) continue;
 
             const mod: *const mbt2.TagType.Module = @ptrCast(@alignCast(tag));
-            addRange(&ranges, &range_count, .from(mod.mod_start), mod.len(), buf.len);
+            addRange(&ranges, &range_count, mod.mod_start, mod.len(), buf.len);
         }
 
         std.mem.sort(Range, ranges[0..range_count], {}, Range.lessThan);

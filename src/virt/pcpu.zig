@@ -203,7 +203,7 @@ pub const Pcpu = struct {
         const vmxon_region_phys = hhdm.physOf(vmxon_page);
 
         std.log.info("virtual buff addr for VMXON at 0x{x}\n", .{@intFromPtr(vmxon_page)});
-        std.log.info("physical buff addr for VMXON at 0x{x}\n", .{vmxon_region_phys.raw()});
+        std.log.info("physical buff addr for VMXON at 0x{x}\n", .{vmxon_region_phys});
 
         @memset(vmxon_page, 0);
         @as(*volatile u32, @ptrCast(vmxon_page)).* = vmx.revisionIdentifier();
