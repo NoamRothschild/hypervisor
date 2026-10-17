@@ -89,10 +89,16 @@ pub const Pcpu = struct {
         }
     }
 
-    /// The vcpu to enter next: the current one until its slice ends, then the next
-    /// runnable one round-robin. null when no vcpu is runnable.
+    /// The vcpu to enter next: one whose LAPIC timer is overdue, so its interrupt
+    /// isn't late by a whole slice, then the current one until its slice ends, then
+    /// the next runnable one round-robin. null when no vcpu is runnable.
+    ///
+    /// only a round-robin pick starts a new slice. an overdue vcpu runs in what is
+    /// left of the current one: two vcpus whose timers keep expiring while the other
+    /// runs would otherwise hand slices back and forth, and starve the rest.
     fn pickNext(self: *Pcpu) ?*Vcpu {
         const now = tsc.read();
+        if (self.overdue(now)) |vcpu| return vcpu;
         if (self.current) |cur| {
             if (cur.state == .runnable and now < self.slice_end_tsc)
                 return cur;
@@ -111,12 +117,28 @@ pub const Pcpu = struct {
         return null;
     }
 
-    /// The earliest LAPIC timer expiry among this core's vcpus, null if none is armed.
-    fn nextDeadline(self: *Pcpu) ?u64 {
+    /// A runnable vcpu, other than the current one, whose LAPIC timer expired by `now`.
+    /// entering it fires the timer (`Vcpu.prepareEntry`) and moves the deadline on.
+    fn overdue(self: *Pcpu, now: u64) ?*Vcpu {
+        for (self.vcpus[0..self.vcpu_count]) |vcpu| {
+            if (vcpu == self.current or vcpu.state != .runnable) continue;
+            const deadline = lapic.timerDeadline(vcpu) orelse continue;
+            if (deadline <= now) return vcpu;
+        }
+        return null;
+    }
+
+    /// The earliest LAPIC timer expiry among this core's vcpus that is still ahead
+    /// of `now`, null if none is. an expired one of another vcpu is left out:
+    /// counting it would arm the preemption timer to 0, which exits before the
+    /// current vcpu runs a single instruction. `pickNext` switches to that vcpu at
+    /// the next exit instead.
+    fn nextDeadline(self: *Pcpu, now: u64) ?u64 {
         var earliest: ?u64 = null;
         for (self.vcpus[0..self.vcpu_count]) |vcpu| {
             if (vcpu.state != .runnable) continue;
             const deadline = lapic.timerDeadline(vcpu) orelse continue;
+            if (vcpu != self.current and deadline <= now) continue;
             if (earliest == null or deadline < earliest.?) earliest = deadline;
         }
         return earliest;
@@ -133,13 +155,14 @@ pub const Pcpu = struct {
     /// Makes the current vcpu exit by the next LAPIC timer expiry of any vcpu (so
     /// it's delivered on time), or by the end of its slice when another vcpu waits.
     fn armPreemptionTimer(self: *Pcpu) void {
-        var until: ?u64 = self.nextDeadline();
+        const now = tsc.read();
+        var until: ?u64 = self.nextDeadline(now);
         if (self.othersRunnable()) {
             if (until == null or self.slice_end_tsc < until.?) until = self.slice_end_tsc;
         }
 
         const ticks: u64 = if (until) |t|
-            (t -| tsc.read()) >> self.preemption_timer_shift
+            (t -| now) >> self.preemption_timer_shift
         else
             std.math.maxInt(u32);
         vmx.vmwrite(.VMX_PREEMPTION_TIMER_VALUE, @min(ticks, std.math.maxInt(u32)));
