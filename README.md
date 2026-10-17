@@ -45,6 +45,9 @@ Features implemented as of 2026-10-17:
 #### Linux booting inside the hypervisor, running under QEMU:
 ![Linux booted inside the hypervisor](./docs/boot-linux-showcase.png)
 
+#### Linux showing 8 cores inside the hypervisor (LAPIC && SMP virtualization working):
+![Linux showing 8 cores](./docs/linux-8-vcpus.png)
+
 On the left is the guest's serial console: the Linux kernel boots and drops into a root shell on a Buildroot initramfs.
 
 ## Memory Managment
