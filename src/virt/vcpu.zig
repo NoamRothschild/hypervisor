@@ -9,6 +9,7 @@ const ept = @import("ept.zig");
 const simulate = @import("simulate.zig");
 const pic_hw = @import("../arch/x86_64/pic.zig");
 const lapic = @import("smp/lapic.zig");
+const virtio_mmio = @import("net/virtio_mmio.zig");
 const rdmsr = msr.rdmsr;
 const vmread = vmx.vmread;
 const vmwrite = vmx.vmwrite;
@@ -322,6 +323,7 @@ pub const Vcpu = struct {
                 const violating_addr: ept.GuestPhys = vmread(.GUEST_PHYSICAL_ADDRESS);
                 switch (violating_addr) {
                     0xfee00000...0xfee00fff => try lapic.eptViolation(self, violating_addr),
+                    virtio_mmio.base...virtio_mmio.base + 0xfff => try virtio_mmio.eptViolation(self, violating_addr),
                     else => try self.abort(),
                 }
 

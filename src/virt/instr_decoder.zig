@@ -1,7 +1,8 @@
 const std = @import("std");
-const Vcpu = @import("../vcpu.zig").Vcpu;
-const vmx = @import("../vmx.zig");
-const ept = @import("../ept.zig");
+const assert = std.debug.assert;
+const Vcpu = @import("vcpu.zig").Vcpu;
+const vmx = @import("vmx.zig");
+const ept = @import("ept.zig");
 
 pub const MmioInstr = struct {
     /// bytes to skip
@@ -15,6 +16,30 @@ pub const MmioInstr = struct {
     imm: u32 = 0,
 
     pub const Kind = enum { load, store_reg, store_imm };
+
+    /// writes `val` into the corresponding register inside `vcpu` or the VMCS, decided by the `register` field
+    /// asserts that `self.kind == .load`
+    pub fn write(self: MmioInstr, vcpu: *Vcpu, val: u64) void {
+        assert(self.kind == .load);
+        switch (self.reg) {
+            .rsp => vmx.vmwrite(.GUEST_RSP, val),
+            inline else => |reg| @field(vcpu.regs, @tagName(reg)) = val,
+        }
+    }
+
+    /// reads the value from the instruction
+    /// assumes 32bits, else, truncates
+    /// asserts that `self.kind == .store_*`
+    pub fn read(self: MmioInstr, vcpu: *Vcpu) u32 {
+        assert(self.kind != .load);
+        if (self.kind == .store_imm)
+            return self.imm;
+
+        return @truncate(switch (self.reg) {
+            .rsp => vmx.vmread(.GUEST_RSP),
+            inline else => |v| @field(vcpu.regs, @tagName(v)),
+        });
+    }
 };
 
 /// longest legal x86 instruction

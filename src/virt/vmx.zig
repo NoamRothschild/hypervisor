@@ -9,6 +9,7 @@ const GuestAllocator = @import("../mem/guest_allocator.zig");
 const Vcpu = @import("vcpu.zig").Vcpu;
 const Pcpu = @import("pcpu.zig").Pcpu;
 const io = @import("io.zig");
+const virtio_mmio = @import("net/virtio_mmio.zig");
 const rdmsr = msr.rdmsr;
 const wrmsr = msr.wrmsr;
 
@@ -91,6 +92,8 @@ pub const VMState = struct {
     serial: io.Serial,
     /// the 8259 pair, wired to the BSP's LINT0 only, see `Vcpu.pendingPicIrq`
     pic: io.Pic,
+    /// the virtio-net device, at `virtio_mmio.base`
+    virtio_net: virtio_mmio.Device,
     /// host IRQs not yet injected into the guest, bit n is IRQ n. filled from `pic.takeReceived`.
     pending_irq: u16,
 
@@ -134,6 +137,7 @@ pub const VMState = struct {
 
         self.serial = .{};
         self.pic = .init;
+        self.virtio_net = .init(.network);
         self.pending_irq = 0;
 
         self.cpus = try mem_allocator.kalloc.alloc(Vcpu, config.vcpu_count);

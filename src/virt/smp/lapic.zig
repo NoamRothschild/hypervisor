@@ -1,7 +1,7 @@
 const std = @import("std");
 const debug = @import("../../debug.zig");
 const ept = @import("../ept.zig");
-const instr_decoder = @import("instr_decoder.zig");
+const instr_decoder = @import("../instr_decoder.zig");
 const ipi = @import("ipi.zig");
 const Vcpu = @import("../vcpu.zig").Vcpu;
 const vmread = @import("../vmx.zig").vmread;
@@ -58,21 +58,11 @@ pub fn eptViolation(vcpu: *Vcpu, violating_addr: ept.GuestPhys) error{Aborted}!v
                 timer_current_count => timerCurrentCount(vcpu),
                 else => vcpu.virt_lapic[lapic_index],
             };
-            switch (mmio_instr.reg) {
-                .rsp => vmwrite(.GUEST_RSP, val),
-                inline else => |reg| @field(vcpu.regs, @tagName(reg)) = val,
-            }
+            mmio_instr.write(vcpu, val);
             std.log.info("lapic LOAD @ 0x{x} = 0x{x}\n", .{ offset, val });
         },
         .store_imm, .store_reg => {
-            const val: u32 = blk: {
-                if (mmio_instr.kind == .store_imm)
-                    break :blk mmio_instr.imm;
-                break :blk @truncate(switch (mmio_instr.reg) {
-                    .rsp => vmread(.GUEST_RSP),
-                    inline else => |v| @field(vcpu.regs, @tagName(v)),
-                });
-            };
+            const val = mmio_instr.read(vcpu);
             std.log.info("lapic STORE @ 0x{x} = 0x{x}\n", .{ offset, val });
 
             switch (offset) {

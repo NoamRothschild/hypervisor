@@ -104,7 +104,7 @@ pub fn load(dst_guest: *vmx.VMState) !void {
 
     const cmdline_max_size = if (bp.hdr.cmdline_size < 256) bp.hdr.cmdline_size else 256;
     var cmdline_val: [256]u8 = @splat(0);
-    _ = std.fmt.bufPrint(cmdline_val[0..cmdline_max_size], "console=ttyS0 earlyprintk=serial nokaslr apic=debug nr_cpus={d} acpi=off noapic", .{dst_guest.cpus.len}) catch |err| {
+    _ = std.fmt.bufPrint(cmdline_val[0..cmdline_max_size], "console=ttyS0 earlyprintk=serial nokaslr apic=debug nr_cpus={d} acpi=off noapic virtio_mmio.device=4K@0xd0000000:5", .{dst_guest.cpus.len}) catch |err| {
         std.log.err("provided guest cmdline too long!", .{});
         return err;
     };

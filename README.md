@@ -127,3 +127,22 @@ To start QEMU paused, waiting for a GDB connection on `:1234`, use
 ```sh
 zig build debug
 ```
+
+## Manually building the guest kernel
+
+The guest kernel requires `CONFIG_VIRTIO_MMIO`, `CONFIG_VIRTIO_NET` and `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES` to be set when compiling.
+
+```bash
+git clone git://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+cd linux
+
+make defconfig
+./scripts/config --enable VIRTIO_MENU \
+                 --enable VIRTIO_MMIO \
+                 --enable VIRTIO_MMIO_CMDLINE_DEVICES \
+                 --enable NETDEVICES \
+                 --enable NET_CORE \
+                 --enable VIRTIO_NET
+make olddefconfig
+make -j$(nproc) bzImage
+```
