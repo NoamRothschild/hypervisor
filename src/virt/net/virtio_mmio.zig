@@ -47,6 +47,9 @@ const Offset = enum(u12) {
 /// device specific configuration space starts here
 const config_offset = 0x100;
 
+/// the MAC address of the guest's NIC. locally administered (bit 1 of the first byte).
+pub const guest_mac: [6]u8 = .{ 0x52, 0x54, 0x00, 0x14, 0x41, 0x44 };
+
 /// "virt", little endian
 const magic: u32 = 0x74726976;
 /// 1 is the legacy interface, 2 the one of virtio 1.0 and later
@@ -81,10 +84,14 @@ pub const VirtioStatus = packed struct(u32) {
 
 /// feature bit 32, the device follows virtio 1.0 and later. required by `interface_version` 2.
 const f_version_1: u64 = 1 << 32;
+/// VIRTIO_NET_F_MAC, feature bit 5: the device has a MAC address in its config space
+const f_net_mac: u64 = 1 << 5;
 
 /// the state of one virtio-mmio device, shared by every vcpu of the guest
 pub const Device = struct {
     device_id: DeviceID,
+    /// the MAC address in the config space, see `virtio_net_config`
+    mac: [6]u8,
     status: VirtioStatus,
     /// the features the device offers
     device_features: u64,
@@ -96,11 +103,12 @@ pub const Device = struct {
     /// the queue the `queue_*` registers refer to
     queue_sel: u32,
 
-    pub fn init(device_id: DeviceID) Device {
+    pub fn init(device_id: DeviceID, mac: [6]u8) Device {
         return .{
             .device_id = device_id,
+            .mac = mac,
             .status = .{},
-            .device_features = f_version_1,
+            .device_features = f_version_1 | f_net_mac,
             .driver_features = 0,
             .device_features_sel = 0,
             .driver_features_sel = 0,
@@ -110,7 +118,7 @@ pub const Device = struct {
 
     /// writing 0 to `status`
     fn reset(self: *Device) void {
-        self.* = .init(self.device_id);
+        self.* = .init(self.device_id, self.mac);
     }
 };
 
@@ -135,7 +143,10 @@ pub fn eptViolation(vcpu: *Vcpu, violating_addr: ept.GuestPhys) error{Aborted}!v
 
     switch (mmio_instr.kind) {
         .load => {
-            const val = read(dev, reg);
+            const val = if (offset >= config_offset)
+                readConfig(dev, offset - config_offset, mmio_instr.size)
+            else
+                read(dev, reg);
             std.log.info("virtio-mmio LOAD @ {s} = 0x{x}\n", .{ name, val });
             mmio_instr.write(vcpu, val);
         },
@@ -151,6 +162,17 @@ pub fn eptViolation(vcpu: *Vcpu, violating_addr: ept.GuestPhys) error{Aborted}!v
 fn regName(reg: Offset, buf: *[8]u8) []const u8 {
     return std.enums.tagName(Offset, reg) orelse
         std.fmt.bufPrint(buf, "0x{x}", .{@intFromEnum(reg)}) catch unreachable;
+}
+
+/// `len` bytes of the config space from `offset` (relative to `config_offset`), little endian.
+/// the config space of virtio-net starts with the MAC, nothing else is offered.
+fn readConfig(dev: *Device, offset: u64, len: u8) u32 {
+    var val: u32 = 0;
+    for (0..@min(len, 4)) |i| {
+        const byte: u32 = if (offset + i < dev.mac.len) dev.mac[offset + i] else 0;
+        val |= byte << @intCast(8 * i);
+    }
+    return val;
 }
 
 fn read(dev: *Device, reg: Offset) u32 {
@@ -179,7 +201,7 @@ fn read(dev: *Device, reg: Offset) u32 {
         .queue_device_low,
         .queue_device_high,
         => 0,
-        // no device specific configuration yet, see `config_offset`
+        // the config space is served by `readConfig`
         _ => unknownAccess(reg),
     };
 }
