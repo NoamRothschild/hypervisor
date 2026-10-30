@@ -12,6 +12,8 @@ const GuestAllocator = @import("mem/guest_allocator.zig");
 const kalloc = &mem_allocator.kalloc;
 const linux = @import("virt/guest_os/linux.zig");
 const tsc = @import("arch/x86_64/tsc.zig");
+const fw_cfg = @import("arch/x86_64/fw_cfg.zig");
+const io = @import("virt/io.zig");
 
 comptime {
     _ = @import("arch/x86_64/entry.zig");
@@ -87,14 +89,17 @@ pub fn kmain() !void {
         trap();
     }
 
+    io.echo_guests_on_com1 = !fw_cfg.has("opt/hypervisor/no-com1-guest-echo");
+
     var pcpu: Pcpu = undefined;
     try pcpu.init();
     defer vmx.vmxoff();
 
-    const guest_states: *[1]vmx.VMState = @ptrCast(try kalloc.allocPage());
+    const guest_states: *[2]vmx.VMState = @ptrCast(try kalloc.allocPage());
 
-    for (guest_states) |*guest_state| {
+    for (guest_states, 0..) |*guest_state, i| {
         try guest_state.prepare(&pcpu, &guest_alloc, .{
+            .id = @intCast(i),
             .ram_block_count = 2, // 2GB memory
             .vcpu_count = 3,
         });

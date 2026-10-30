@@ -12,6 +12,14 @@ pub inline fn outb(port: u16, byte: u8) void {
         : .{ .al = true, .dx = true });
 }
 
+pub inline fn outw(port: u16, word: u16) void {
+    asm volatile ("outw %[word], %[port]"
+        :
+        : [port] "{dx}" (port),
+          [word] "{ax}" (word),
+    );
+}
+
 pub inline fn inb(port: u16) u8 {
     var ret: u8 = undefined;
     asm volatile ("inb %[port], %[ret]"
@@ -25,7 +33,10 @@ pub inline fn wait() void {
     outb(0x80, 0);
 }
 
+/// the host's log
 pub const COM1 = 0x03F8;
+/// every guest's serial output, as `[guest id][byte]` pairs. `tools/vmlog.py` splits it back per guest.
+pub const COM2 = 0x02F8;
 
 pub var logging_enabled = true;
 

@@ -113,9 +113,30 @@ pub fn build(b: *std.Build) void {
     const default_mem = "8G,maxmem=24G";
     const mem_override = b.option([]const u8, "mem", "Example Value: `16G`; The amount of memory passed into the virtualized system inside QEMU (default=`" ++ default_mem ++ "`)") orelse default_mem;
 
+    const qemu_base_args = [_][]const u8{
+        "qemu-system-x86_64", "-cdrom", out_iso,
+    };
+    const qemu_cpu_opts = [_][]const u8{
+        "-enable-kvm", "-cpu", "host,vmx=on",
+    };
+
+    // COM1 is the host's log
+    // COM2 carries every guest's output in a format `tools/vmlog.py` understands.
+
+    const guests_serial_args = [_][]const u8{
+        "-chardev", "socket,id=guests,path=zig-out/guests.sock,server=on,wait=off,logfile=zig-out/guests.serial",
+        "-serial",  "chardev:guests",
+    };
+
+    const serial_args = [_][]const u8{
+        "-chardev", "stdio,id=host,logfile=zig-out/host.serial",
+        "-serial",  "chardev:host",
+    } ++ guests_serial_args;
+
     {
-        const cmd = addMemOverride(b, &[_][]const u8{ "qemu-system-x86_64", "-cdrom", out_iso, "-serial", "stdio", "-enable-kvm", "-cpu", "host,vmx=on" }, mem_override);
+        const cmd = addMemOverride(b, &(qemu_base_args ++ serial_args ++ qemu_cpu_opts), mem_override);
         defer b.allocator.free(cmd);
+
         const run_qemu = b.addSystemCommand(cmd);
         const qemu_step = b.step("run", "compile & launch qemu");
 
@@ -127,8 +148,10 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        const cmd = addMemOverride(b, &[_][]const u8{ "qemu-system-x86_64", "-cdrom", out_iso, "-s", "-S", "-serial", "stdio", "-enable-kvm", "-cpu", "host,vmx=on" }, mem_override);
+        const cmd = addMemOverride(b, &(qemu_base_args ++ [_][]const u8{ "-s", "-S" } ++
+            serial_args ++ qemu_cpu_opts), mem_override);
         defer b.allocator.free(cmd);
+
         const run_qemu = b.addSystemCommand(cmd);
         const qemu_step = b.step("debug", "compile & launch qemu with a debugger");
 
@@ -137,5 +160,25 @@ pub fn build(b: *std.Build) void {
             run_qemu.step.dependOn(step);
         }
         qemu_step.dependOn(&run_qemu.step);
+    }
+
+    {
+        const tui = [_][]const u8{ "python3", "tools/vmtui.py", "--split-view", "--launch" };
+
+        const qemu = qemu_base_args ++
+            [_][]const u8{ "-display", "none", "-serial", "file:zig-out/host.serial" };
+        const no_guest_echo = [_][]const u8{ "-fw_cfg", "name=opt/hypervisor/no-com1-guest-echo,string=1" };
+
+        const cmd = addMemOverride(b, &(tui ++ qemu ++ no_guest_echo ++ guests_serial_args ++ qemu_cpu_opts), mem_override);
+        defer b.allocator.free(cmd);
+
+        const run_tui = b.addSystemCommand(cmd);
+        const tui_step = b.step("tui", "compile & launch qemu inside tools/vmtui.py, every machine's serial side by side");
+
+        tui_step.dependOn(default_step);
+        for (compile_steps) |step| {
+            run_tui.step.dependOn(step);
+        }
+        tui_step.dependOn(&run_tui.step);
     }
 }

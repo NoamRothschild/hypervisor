@@ -3,6 +3,7 @@ const std = @import("std");
 const debug = @import("../debug.zig");
 const vmx = @import("vmx.zig");
 const Vcpu = @import("vcpu.zig").Vcpu;
+const Pcpu = @import("pcpu.zig").Pcpu;
 const IoQual = vmx.ExitQualification.Io;
 
 pub fn handleIo(vcpu: *Vcpu, qual: IoQual) error{Aborted}!void {
@@ -56,24 +57,131 @@ pub const Serial = struct {
     ier: u8 = 0,
     /// Modem Control Register
     mcr: u8 = 0,
+    /// a "transmit buffer empty" interrupt the guest has not read from the IIR yet
+    thre_pending: bool = false,
+    /// input from COM2 the guest has not read yet, see `receiveInput`
+    rx: [256]u8 = undefined,
+    rx_head: u8 = 0,
+    rx_len: u16 = 0,
+
+    const ier_rdi: u8 = 1 << 0;
+    const ier_thre: u8 = 1 << 1;
+    const iir_no_int: u8 = 0b001;
+    const iir_thre: u8 = 0b010;
+    const iir_rdi: u8 = 0b100;
+    const lsr_data_ready: u8 = 1 << 0;
+    /// the transmit holding register and the transmitter are always empty, COM2 takes each byte at once
+    const lsr_tx_empty: u8 = 1 << 5 | 1 << 6;
+    /// the guest's COM1 IRQ, every interrupt of its UART raises it
+    const irq: u4 = 4;
+
+    /// COM2 takes every byte at once, so the transmit buffer is empty again as soon as it is written to
+    fn raiseThre(self: *Serial, vm: *vmx.VMState) void {
+        if (self.ier & ier_thre == 0) return;
+        self.thre_pending = true;
+        vm.pending_irq |= 1 << irq;
+    }
+
+    /// queues `byte` for the guest to read, dropped when the queue is full
+    fn receive(self: *Serial, vm: *vmx.VMState, byte: u8) void {
+        if (self.rx_len == self.rx.len) return;
+        self.rx[self.rx_head +% @as(u8, @truncate(self.rx_len))] = byte;
+        self.rx_len += 1;
+        if (self.ier & ier_rdi != 0) vm.pending_irq |= 1 << irq;
+    }
+
+    /// the next queued input byte, 0 when there is none
+    fn read(self: *Serial) u8 {
+        if (self.rx_len == 0) return 0;
+        const byte = self.rx[self.rx_head];
+        self.rx_head +%= 1;
+        self.rx_len -= 1;
+        return byte;
+    }
+
+    /// the highest priority interrupt pending, received data before THRE. reading a THRE clears it.
+    fn readIir(self: *Serial) u8 {
+        if (self.rx_len != 0 and self.ier & ier_rdi != 0) return iir_rdi;
+        if (!self.thre_pending) return iir_no_int;
+        self.thre_pending = false;
+        return iir_thre;
+    }
+
+    fn readLsr(self: *Serial) u8 {
+        return lsr_tx_empty | @as(u8, if (self.rx_len != 0) lsr_data_ready else 0);
+    }
 };
+
+/// whether guest output also goes to COM1, mixed into the host's log so it shows when each
+/// VM-exit happened. `zig build tui` turns it off (`main.zig`), it shows the host and the guests apart.
+pub var echo_guests_on_com1 = true;
+
+/// COM2's IRQ. guest input arrives on it, as `[guest id][byte]` pairs.
+pub const input_irq: u4 = 3;
+/// the guest id of the pair being received, null while waiting for one
+var input_guest: ?u8 = null;
+
+/// Moves every byte COM2 received into the queue of the guest it is for (`Serial.receive`),
+/// found among the vcpus `Pcpu.running` runs. called from the host's IRQ handler, which only
+/// runs between VM-exit and VM-entry (`Vcpu.handleExit`), so no guest state is in use meanwhile.
+pub fn receiveInput() void {
+    const com2_lsr = debug.COM2 + 5;
+    while (debug.inb(com2_lsr) & Serial.lsr_data_ready != 0) {
+        const byte = debug.inb(debug.COM2);
+        const id = input_guest orelse {
+            input_guest = byte;
+            continue;
+        };
+        input_guest = null;
+        deliver(findVm(id) orelse continue, byte);
+    }
+}
+
+/// COM1's IRQ. what is typed into QEMU's terminal arrives on it, for `console_guest`.
+pub const console_irq: u4 = 4;
+/// the guest that gets COM1's input, as when COM1 was passed through
+const console_guest: u8 = 0;
+
+/// Moves every byte COM1 received into `console_guest`'s queue, like `receiveInput`.
+pub fn receiveConsoleInput() void {
+    const com1_lsr = debug.COM1 + 5;
+    const vm = findVm(console_guest) orelse return;
+
+    while (debug.inb(com1_lsr) & Serial.lsr_data_ready != 0)
+        deliver(vm, debug.inb(debug.COM1));
+}
+
+fn findVm(id: u8) ?*vmx.VMState {
+    const pcpu = Pcpu.running orelse return null;
+    for (pcpu.vcpus[0..pcpu.vcpu_count]) |vcpu| {
+        if (vcpu.vm.id != id) continue;
+        return vcpu.vm;
+    }
+    return null;
+}
+
+/// queues `byte` for the guest `id`, found among the vcpus `Pcpu.running` runs.
+/// before the guests run, and for ids no guest has, the byte is dropped
+fn deliver(vm: *vmx.VMState, byte: u8) void {
+    vm.serial.receive(vm, byte);
+}
 
 pub fn handleSerialIn(vcpu: *Vcpu, qual: IoQual) error{Aborted}!void {
     switch (qual.port) {
         // COM1 PORTS: 0x03F8 - 0x3FF
 
         // Receive buffer
-        0x3F8 => vcpu.regs.rax = debug.inb(qual.port), // pass-through
+        0x3F8 => vcpu.regs.rax = vcpu.vm.serial.read(),
         // Interrupt Enable Register (DLAB=1) / Divisor Latch High Register (DLAB=0)
         0x3F9 => vcpu.regs.rax = vcpu.vm.serial.ier,
         // Interrupt Identification Register
-        0x3FA => vcpu.regs.rax = debug.inb(qual.port), // pass-through
+        0x3FA => vcpu.regs.rax = vcpu.vm.serial.readIir(),
         // Line Control Register (MSB is DLAB)
         0x3FB => vcpu.regs.rax = 0x00,
         // Modem Control Register
         0x3FC => vcpu.regs.rax = vcpu.vm.serial.mcr,
         // Line Status Register
-        0x3FD => vcpu.regs.rax = debug.inb(qual.port), // pass-through
+        0x3FD => vcpu.regs.rax = vcpu.vm.serial.readLsr(),
         // Modem Status Register
         0x3FE => vcpu.regs.rax = debug.inb(qual.port), // pass-through
         // Scratch Register
@@ -86,10 +194,25 @@ fn handleSerialOut(vcpu: *Vcpu, qual: IoQual) error{Aborted}!void {
     switch (qual.port) {
         // COM1 PORTS: 0x03F8 - 0x3FF
 
-        // Transmit buffer
-        0x3F8 => debug.outb(debug.COM1, @truncate(vcpu.regs.rax)),
+        // Transmit buffer, tagged with the guest it came from. a single pcpu runs every vcpu,
+        // so nothing can write to COM2 between the two bytes.
+        0x3F8 => {
+            debug.outb(debug.COM2, vcpu.vm.id);
+            debug.outb(debug.COM2, @truncate(vcpu.regs.rax));
+            if (echo_guests_on_com1) debug.outb(debug.COM1, @truncate(vcpu.regs.rax));
+            vcpu.vm.serial.raiseThre(vcpu.vm);
+        },
         // Interrupt Enable Register
-        0x3F9 => vcpu.vm.serial.ier = @truncate(vcpu.regs.rax),
+        0x3F9 => {
+            const serial = &vcpu.vm.serial;
+            const enabled = ~serial.ier & @as(u8, @truncate(vcpu.regs.rax));
+            serial.ier = @truncate(vcpu.regs.rax);
+            // enabling THRE with an empty transmit buffer raises it right away
+            if (enabled & Serial.ier_thre != 0) serial.raiseThre(vcpu.vm);
+            // so does enabling received data with input queued
+            if (enabled & Serial.ier_rdi != 0 and serial.rx_len != 0) vcpu.vm.pending_irq |= 1 << Serial.irq;
+            if (serial.ier & Serial.ier_thre == 0) serial.thre_pending = false;
+        },
         // FIFO control registers
         0x3FA => {}, // ignore
         // Line Control Register (MSB is DLAB)

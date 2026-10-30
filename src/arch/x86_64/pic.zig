@@ -3,6 +3,7 @@ const debug = @import("../../debug.zig");
 const outb = debug.outb;
 const wait = debug.wait;
 const timer = @import("timer.zig");
+const io = @import("../../virt/io.zig");
 // const keyboard = @import("keyboard.zig");
 const log = @import("std").log;
 
@@ -75,9 +76,10 @@ pub fn init() void {
     remap(pic_master_offset, pic_slave_offset);
     timer.init(50); // TODO: change the frequency to not be an arbitrary value
 
-    // make COM1 raise IRQ4 when a byte is received and when it finished sending a byte.
-    // the guest's own writes to IER never reach the hardware (`virt/io.zig` only stores them in `vm.serial.ier`)
-    outb(debug.COM1 + 1, 0b0000_0011);
+    // make COM2 raise IRQ3 when a byte is received, that's the guests' input (`io.receiveInput`),
+    // and COM1 raise IRQ4, that's what is typed into QEMU's terminal (`io.receiveConsoleInput`).
+    outb(debug.COM2 + 1, 0b0000_0001);
+    outb(debug.COM1 + 1, 0b0000_0001);
 }
 
 pub fn notifyEoi(irq: u4) void {
@@ -90,12 +92,13 @@ export fn irqHandler(cpu_state: *cpuState) callconv(.c) void {
     const irq: u4 = @intCast(cpu_state.*.interrupt_id - user_intr_base);
     defer notifyEoi(irq);
 
-    setReceived(irq);
+    // COM1 and COM2 are the host's, the guests' UARTs are emulated (`io.Serial`) and raise their own IRQ
+    if (irq != io.input_irq and irq != io.console_irq) setReceived(irq);
     switch (irq) {
         0 => timer.callback(),
         // 1 => keyboard.callback(),
-        // COM1, only forwarded to the guest.
-        4 => {},
+        io.input_irq => io.receiveInput(),
+        io.console_irq => io.receiveConsoleInput(),
         else => {
             log.debug("an irq has been called from pic number {d}\n", .{irq});
             log.debug("cpu state: {any}\n\n", .{cpu_state.*});

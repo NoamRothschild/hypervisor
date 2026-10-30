@@ -87,6 +87,8 @@ pub const VMState = struct {
     guest_mem_pages: []*align(0x1000) [1 << 30]u8,
     /// per-core state, one entry per logical core of the guest. `cpus[0]` is the BSP.
     cpus: []Vcpu,
+    /// tags this guest's serial output on COM2, see `debug.COM2`
+    id: u8,
 
     // devices shared by every vcpu
     serial: io.Serial,
@@ -98,6 +100,8 @@ pub const VMState = struct {
     pending_irq: u16,
 
     pub const VMConfig = struct {
+        /// index of the guest, see `VMState.id`
+        id: u8,
         os: enum { linux, windows } = .linux,
         vcpu_count: u8 = 1,
         /// each block size is 1GB
@@ -113,6 +117,7 @@ pub const VMState = struct {
     /// `pcpu` must be in VMX operation (`Pcpu.init`).
     pub fn prepare(self: *VMState, pcpu: *Pcpu, guest_allocator: *GuestAllocator, config: VMConfig) !void {
         self.guest_ram_block_count = config.ram_block_count;
+        self.id = config.id;
 
         const eptp = try ept.init(self, guest_allocator, config.ram_block_count);
 
@@ -129,8 +134,6 @@ pub const VMState = struct {
         };
         @memset(self.io_bitmap.first.*[0..], 0xff);
         @memset(self.io_bitmap.second.*[0..], 0xff);
-        // COM1 data register
-        self.io_bitmap.passPort(debug.COM1);
         // PIT ports;  FIXME: this should be virtualized!
         for (0x0040..0x0047 + 1) |port|
             self.io_bitmap.passPort(@truncate(port));

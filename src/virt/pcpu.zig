@@ -27,6 +27,9 @@ pub const Pcpu = struct {
     /// the VMX-preemption timer counts down once every 2^shift TSC cycles (IA32_VMX_MISC[4:0])
     preemption_timer_shift: u5,
 
+    /// the pcpu inside `run`, `io.receiveInput` looks for the guests among its vcpus
+    pub var running: ?*Pcpu = null;
+
     pub const max_vcpus = 16;
     /// how long a vcpu runs before another runnable one gets its turn
     const slice_ms = 1;
@@ -74,6 +77,8 @@ pub const Pcpu = struct {
     pub fn run(self: *Pcpu) void {
         // IRQs from before the guests existed aren't theirs to receive
         _ = pic_hw.takeReceived();
+        running = self;
+        defer running = null;
 
         while (self.pickNext()) |vcpu| {
             self.load(vcpu) catch {

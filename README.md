@@ -19,7 +19,7 @@ Features implemented as of 2026-10-17:
     - Control register emulation (CR0, CR3, CR4)
     - I/O port virtualization:
         - Virtual 8259 PIC
-        - Virtual serial port (COM1)
+        - Virtual serial port (COM1), with each guest's output split out to its own stream
     - MMIO emulation: EPT violations decoded with a small x86 `mov` instruction decoder
     - Interrupt delivery:
         - Hardware IRQ injection into guest
@@ -49,6 +49,9 @@ Features implemented as of 2026-10-17:
 ![Linux showing 8 cores](./docs/linux-8-vcpus.png)
 
 On the left is the guest's serial console: the Linux kernel boots and drops into a root shell on a Buildroot initramfs.
+
+#### Two Linux guests side by side in `zig build tui`, each with its own serial console and input:
+![Two Linux guests in vmtui's split view](./docs/multi-guest.gif)
 
 ## Memory Managment
 
@@ -94,14 +97,9 @@ Build the hypervisor and the bootable ISO with
 zig build
 ```
 
-## Running
+## Running with QEMU
 
 **THIS PROJECT CURRENTLY WILL ONLY WORK ON INTEL-BASED CPUS AND WAS TESTED ONLY UNDER A LINUX HOST IN QEMU**
-
-The build output is `zig-out/kernel.iso`, which holds GRUB, the hypervisor,
-and the Linux guest.
-The hypervisor needs an Intel CPU with VT-x and EPT. The easiest way to run it
-is QEMU with KVM and nested virtualization enabled on the host.
 
 ### Host requirements (Linux host)
 - **KVM access**: your user must be able to open `/dev/kvm` (on some distros
@@ -112,31 +110,28 @@ is QEMU with KVM and nested virtualization enabled on the host.
   to enable it.
 
 ### Launching
-```sh
-qemu-system-x86_64 -cdrom zig-out/kernel.iso -serial stdio -enable-kvm -cpu host,vmx=on -m 8G
-```
-The guest's console goes to the serial port, so it shows up in your terminal.
 
-To build and run with QEMU in one step, use
+you would generally want
 ```sh
-zig build run
+zig build tui
 ```
-QEMU gets 8GB of RAM by default. Change it with `-Dmem`, for example `zig build run -Dmem=16G`.
+QEMU gets 8GB of RAM by default. Change it with `-Dmem`, for example `zig build tui -Dmem=16G`
 
-To start QEMU paused, waiting for a GDB connection on `:1234`, use
-```sh
-zig build debug
-```
+`←`/`→` moves between active pane (for typing), `PgUp`/`PgDn` scroll back (`End` returns to live output),
+`Ctrl+C` quits and stops QEMU.
+
+Note that `zig build run` and `zig build debug` also exist, but they are used mostly for debugging and development.
 
 ## Manually building the guest kernel
-
-The guest kernel requires `CONFIG_VIRTIO_MMIO`, `CONFIG_VIRTIO_NET` and `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES` to be set when compiling.
-
+<details>
+    <summary>Manually building the guest kernel</summary>
+    
 ```bash
 git clone git://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
 cd linux
 
 make defconfig
+# The guest kernel requires the virtio-net driver to exist for networking
 ./scripts/config --enable VIRTIO_MENU \
                  --enable VIRTIO_MMIO \
                  --enable VIRTIO_MMIO_CMDLINE_DEVICES \
@@ -146,3 +141,4 @@ make defconfig
 make olddefconfig
 make -j$(nproc) bzImage
 ```
+</summary>
