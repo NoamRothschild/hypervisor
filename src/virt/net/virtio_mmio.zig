@@ -5,6 +5,8 @@
 const std = @import("std");
 const debug = @import("../../debug.zig");
 const Vcpu = @import("../vcpu.zig").Vcpu;
+const virtqueue = @import("virtqueue.zig");
+const Queue = virtqueue.Queue;
 const ept = @import("../ept.zig");
 const vmread = @import("../vmx.zig").vmread;
 const vmwrite = @import("../vmx.zig").vmwrite;
@@ -100,6 +102,7 @@ pub const Device = struct {
     /// which 32 bit half of the features `device_features`/`driver_features` access
     device_features_sel: u32,
     driver_features_sel: u32,
+    queues: [virtqueue.queue_count]Queue,
     /// the queue the `queue_*` registers refer to
     queue_sel: u32,
 
@@ -112,8 +115,18 @@ pub const Device = struct {
             .driver_features = 0,
             .device_features_sel = 0,
             .driver_features_sel = 0,
+            .queues = .{
+                Queue{},
+                Queue{},
+            },
             .queue_sel = 0,
         };
+    }
+
+    fn selectedQueue(self: *Device) *Queue {
+        // checks for queue_sel setup must be enfored before.
+        // this code assumes the index is valid.
+        return &self.queues[self.queue_sel];
     }
 
     /// writing 0 to `status`
@@ -183,8 +196,8 @@ fn read(dev: *Device, reg: Offset) u32 {
         .vendor_id => vendor,
         .device_features => featuresHalf(dev.device_features, dev.device_features_sel),
         .status => @bitCast(dev.status),
-        // no queue exists yet, 0 tells the driver that the selected queue is unavailable
-        .queue_num_max, .queue_ready => 0,
+        .queue_num_max => virtqueue.queue_count,
+        .queue_ready => 0,
         .interrupt_status, .config_generation => 0,
         // write-only registers
         .device_features_sel,
@@ -215,10 +228,17 @@ fn write(dev: *Device, reg: Offset, val: u32) void {
             const mask = @as(u64, 0xffff_ffff) << shift;
             dev.driver_features = (dev.driver_features & ~mask) | (@as(u64, val) << shift);
         },
-        .queue_sel => dev.queue_sel = val,
+        .queue_sel => {
+            if (val > virtqueue.queue_count)
+                std.debug.panic("guest set an out of bounds queue_sel num: {d} (max: {d})", .{ val, virtqueue.queue_count - 1 });
+            dev.queue_sel = val;
+        },
         .status => writeStatus(dev, val),
+        .queue_num => {
+            // number of elements in the queue
+            dev.selectedQueue().num = @truncate(val);
+        },
         // queues are set up in a later step
-        .queue_num,
         .queue_ready,
         .queue_notify,
         .interrupt_ack,
