@@ -123,6 +123,11 @@ pub const Device = struct {
         };
     }
 
+    fn notify(self: *Device, vcpu: *Vcpu, val: u64) !void {
+        _ = .{ self, vcpu, val };
+        @panic("todo: implement");
+    }
+
     fn selectedQueue(self: *Device) *Queue {
         // checks for queue_sel setup must be enfored before.
         // this code assumes the index is valid.
@@ -166,7 +171,7 @@ pub fn eptViolation(vcpu: *Vcpu, violating_addr: ept.GuestPhys) error{Aborted}!v
         .store_imm, .store_reg => {
             const val = mmio_instr.read(vcpu);
             std.log.info("virtio-mmio STORE @ {s} = 0x{x}\n", .{ name, val });
-            write(dev, reg, val);
+            try write(vcpu, dev, reg, val);
         },
     }
 }
@@ -219,7 +224,7 @@ fn read(dev: *Device, reg: Offset) u32 {
     };
 }
 
-fn write(dev: *Device, reg: Offset, val: u32) void {
+fn write(vcpu: *Vcpu, dev: *Device, reg: Offset, val: u32) error{Aborted}!void {
     switch (reg) {
         .device_features_sel => dev.device_features_sel = val,
         .driver_features_sel => dev.driver_features_sel = val,
@@ -230,24 +235,32 @@ fn write(dev: *Device, reg: Offset, val: u32) void {
         },
         .queue_sel => {
             if (val > virtqueue.queue_count)
-                std.debug.panic("guest set an out of bounds queue_sel num: {d} (max: {d})", .{ val, virtqueue.queue_count - 1 });
+                return vcpu.abortMsg("guest set an out of bounds queue_sel num: {d} (max: {d})", .{ val, virtqueue.queue_count - 1 });
             dev.queue_sel = val;
         },
         .status => writeStatus(dev, val),
         .queue_num => {
             // number of elements in the queue
-            dev.selectedQueue().num = @truncate(val);
+            if (val == 0 or val > Queue.max_size or !std.math.isPowerOfTwo(val))
+                return vcpu.abortMsg("bad queue size in virtio-net: {d}\n", .{val});
+            dev.selectedQueue().size = @truncate(val);
         },
-        // queues are set up in a later step
-        .queue_ready,
-        .queue_notify,
+        .queue_desc_low => Queue.setLow(&dev.selectedQueue().desc_gpa, val),
+        .queue_desc_high => Queue.setHigh(&dev.selectedQueue().desc_gpa, val),
+        .queue_driver_low => Queue.setLow(&dev.selectedQueue().avail_gpa, val),
+        .queue_driver_high => Queue.setHigh(&dev.selectedQueue().avail_gpa, val),
+        .queue_device_low => Queue.setLow(&dev.selectedQueue().used_gpa, val),
+        .queue_device_high => Queue.setHigh(&dev.selectedQueue().used_gpa, val),
+        .queue_ready => {
+            const q = dev.selectedQueue();
+            q.ready = val == 1;
+            if (q.ready) {
+                try q.validate(vcpu);
+                std.log.info("queue {}: size={} desc=0x{x} avail=0x{x} used=0x{x}", .{ dev.queue_sel, q.size, q.desc_gpa, q.avail_gpa, q.used_gpa });
+            }
+        },
+        .queue_notify => try dev.notify(vcpu, val),
         .interrupt_ack,
-        .queue_desc_low,
-        .queue_desc_high,
-        .queue_driver_low,
-        .queue_driver_high,
-        .queue_device_low,
-        .queue_device_high,
         => {},
         // read-only registers
         .magic_value,
