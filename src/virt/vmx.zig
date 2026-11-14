@@ -9,6 +9,7 @@ const GuestAllocator = @import("../mem/guest_allocator.zig");
 const Vcpu = @import("vcpu.zig").Vcpu;
 const Pcpu = @import("pcpu.zig").Pcpu;
 const io = @import("io.zig");
+const virtio = @import("net/virtio.zig");
 const virtio_mmio = @import("net/virtio_mmio.zig");
 const rdmsr = msr.rdmsr;
 const wrmsr = msr.wrmsr;
@@ -95,7 +96,7 @@ pub const VMState = struct {
     /// the 8259 pair, wired to the BSP's LINT0 only, see `Vcpu.pendingPicIrq`
     pic: io.Pic,
     /// the virtio-net device, at `virtio_mmio.base`
-    virtio_net: virtio_mmio.Device,
+    virtio_net: virtio.NetDevice,
     /// host IRQs not yet injected into the guest, bit n is IRQ n. filled from `pic.takeReceived`.
     pending_irq: u16,
 

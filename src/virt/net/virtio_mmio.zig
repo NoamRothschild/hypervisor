@@ -7,7 +7,11 @@ const debug = @import("../../debug.zig");
 const Vcpu = @import("../vcpu.zig").Vcpu;
 const virtqueue = @import("virtqueue.zig");
 const Queue = virtqueue.Queue;
+const virtio = @import("virtio.zig");
+const NetDevice = virtio.NetDevice;
+const VirtioStatus = virtio.VirtioStatus;
 const ept = @import("../ept.zig");
+const VMState = @import("../vmx.zig").VMState;
 const vmread = @import("../vmx.zig").vmread;
 const vmwrite = @import("../vmx.zig").vmwrite;
 const instr_decoder = @import("../instr_decoder.zig");
@@ -59,87 +63,6 @@ const interface_version: u32 = 2;
 /// "NOAM", little endian
 const vendor: u32 = 0x4d414f4e;
 
-pub const DeviceID = enum(u32) {
-    invalid = 0,
-    network = 1,
-    block = 2,
-    console = 3,
-    entropy = 4,
-    memory_balloon = 5,
-    filesystem_9p = 9,
-    gpu = 16,
-    input = 18,
-    filesystem_fs = 26,
-    _,
-};
-
-pub const VirtioStatus = packed struct(u32) {
-    ack: bool = false, // (0x01)
-    driver: bool = false, // (0x02)
-    driver_ok: bool = false, // (0x04)
-    feat_ok: bool = false, // (0x08)
-    rsvd: u2 = 0,
-    needs_reset: bool = false, // (0x40)
-    failed: bool = false, // (0x80)
-    rsvd1: u24 = 0,
-};
-
-/// feature bit 32, the device follows virtio 1.0 and later. required by `interface_version` 2.
-const f_version_1: u64 = 1 << 32;
-/// VIRTIO_NET_F_MAC, feature bit 5: the device has a MAC address in its config space
-const f_net_mac: u64 = 1 << 5;
-
-/// the state of one virtio-mmio device, shared by every vcpu of the guest
-pub const Device = struct {
-    device_id: DeviceID,
-    /// the MAC address in the config space, see `virtio_net_config`
-    mac: [6]u8,
-    status: VirtioStatus,
-    /// the features the device offers
-    device_features: u64,
-    /// the features the driver accepted
-    driver_features: u64,
-    /// which 32 bit half of the features `device_features`/`driver_features` access
-    device_features_sel: u32,
-    driver_features_sel: u32,
-    queues: [virtqueue.queue_count]Queue,
-    /// the queue the `queue_*` registers refer to
-    queue_sel: u32,
-
-    pub fn init(device_id: DeviceID, mac: [6]u8) Device {
-        return .{
-            .device_id = device_id,
-            .mac = mac,
-            .status = .{},
-            .device_features = f_version_1 | f_net_mac,
-            .driver_features = 0,
-            .device_features_sel = 0,
-            .driver_features_sel = 0,
-            .queues = .{
-                Queue{},
-                Queue{},
-            },
-            .queue_sel = 0,
-        };
-    }
-
-    fn notify(self: *Device, vcpu: *Vcpu, val: u64) !void {
-        _ = .{ self, vcpu, val };
-        @panic("todo: implement");
-    }
-
-    fn selectedQueue(self: *Device) *Queue {
-        // checks for queue_sel setup must be enfored before.
-        // this code assumes the index is valid.
-        return &self.queues[self.queue_sel];
-    }
-
-    /// writing 0 to `status`
-    fn reset(self: *Device) void {
-        self.* = .init(self.device_id, self.mac);
-    }
-};
-
 pub fn eptViolation(vcpu: *Vcpu, violating_addr: ept.GuestPhys) error{Aborted}!void {
     const old_debug_enable = debug.logging_enabled;
     defer debug.logging_enabled = old_debug_enable;
@@ -184,7 +107,7 @@ fn regName(reg: Offset, buf: *[8]u8) []const u8 {
 
 /// `len` bytes of the config space from `offset` (relative to `config_offset`), little endian.
 /// the config space of virtio-net starts with the MAC, nothing else is offered.
-fn readConfig(dev: *Device, offset: u64, len: u8) u32 {
+fn readConfig(dev: *NetDevice, offset: u64, len: u8) u32 {
     var val: u32 = 0;
     for (0..@min(len, 4)) |i| {
         const byte: u32 = if (offset + i < dev.mac.len) dev.mac[offset + i] else 0;
@@ -193,7 +116,7 @@ fn readConfig(dev: *Device, offset: u64, len: u8) u32 {
     return val;
 }
 
-fn read(dev: *Device, reg: Offset) u32 {
+fn read(dev: *NetDevice, reg: Offset) u32 {
     return switch (reg) {
         .magic_value => magic,
         .version => interface_version,
@@ -201,9 +124,10 @@ fn read(dev: *Device, reg: Offset) u32 {
         .vendor_id => vendor,
         .device_features => featuresHalf(dev.device_features, dev.device_features_sel),
         .status => @bitCast(dev.status),
-        .queue_num_max => virtqueue.queue_count,
+        .queue_num_max => Queue.max_size,
         .queue_ready => 0,
-        .interrupt_status, .config_generation => 0,
+        .interrupt_status => dev.interrupt_status,
+        .config_generation => 0,
         // write-only registers
         .device_features_sel,
         .driver_features,
@@ -224,7 +148,7 @@ fn read(dev: *Device, reg: Offset) u32 {
     };
 }
 
-fn write(vcpu: *Vcpu, dev: *Device, reg: Offset, val: u32) error{Aborted}!void {
+fn write(vcpu: *Vcpu, dev: *NetDevice, reg: Offset, val: u32) error{Aborted}!void {
     switch (reg) {
         .device_features_sel => dev.device_features_sel = val,
         .driver_features_sel => dev.driver_features_sel = val,
@@ -260,8 +184,8 @@ fn write(vcpu: *Vcpu, dev: *Device, reg: Offset, val: u32) error{Aborted}!void {
             }
         },
         .queue_notify => try dev.notify(vcpu, val),
-        .interrupt_ack,
-        => {},
+        // the driver's interrupt handler acknowledges the bits it read from InterruptStatus
+        .interrupt_ack => dev.interrupt_status &= ~val,
         // read-only registers
         .magic_value,
         .version,
@@ -292,7 +216,7 @@ fn featuresHalf(features: u64, sel: u32) u32 {
     };
 }
 
-fn writeStatus(dev: *Device, val: u32) void {
+fn writeStatus(dev: *NetDevice, val: u32) void {
     if (val == 0) {
         std.log.info("virtio-mmio: device reset\n", .{});
         dev.reset();
@@ -306,7 +230,7 @@ fn writeStatus(dev: *Device, val: u32) void {
         new.feat_ok = false;
     }
     // virtio 1.0+ requires VERSION_1
-    if (new.feat_ok and (dev.driver_features & f_version_1) == 0) {
+    if (new.feat_ok and (dev.driver_features & virtio.f_version_1) == 0) {
         std.log.warn("virtio-mmio: driver didn't accept VERSION_1\n", .{});
         new.feat_ok = false;
     }

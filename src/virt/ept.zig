@@ -367,13 +367,78 @@ fn blockOf(guest_state: *vmx.VMState, addr: u64) ?usize {
     return if (i < guest_state.guest_mem_pages.len) i else null;
 }
 
-/// Whether all of guest physical `addr`..`addr + len` is RAM.
-fn isRam(guest_state: *vmx.VMState, addr: u64, len: usize) bool {
-    if (len == 0) return true;
-    for (addr >> 30..((addr + len - 1) >> 30) + 1) |slot| {
-        if (blockOf(guest_state, slot << 30) == null) return false;
+/// the size of one RAM block, and of the guest physical slot it is mapped at
+const block_size: usize = 1 << 30;
+
+pub const GuestMemError = error{
+    /// part of the range is outside guest RAM, or inside the MMIO hole
+    NotRam,
+    /// the address isn't naturally aligned for the type
+    Misaligned,
+    /// the value is RAM, but split between two RAM blocks, which aren't adjacent in host memory
+    CrossesBlock,
+};
+
+/// Errors unless all of guest physical `gpa`..`gpa + len` is RAM.
+/// Safe for any guest-controlled `gpa` and `len`: the end of the range can't overflow.
+pub fn checkRam(guest_state: *vmx.VMState, gpa: GuestPhys, len: usize) GuestMemError!void {
+    if (len == 0) return;
+    const last = std.math.add(u64, gpa, len - 1) catch return error.NotRam;
+    // RAM is a run of slots, so this stops at most one slot past the last block
+    var slot = gpa >> 30;
+    while (slot <= last >> 30) : (slot += 1) {
+        if (blockOf(guest_state, slot << 30) == null) return error.NotRam;
     }
-    return true;
+}
+
+/// The host memory behind a range of guest RAM, one slice per RAM block the range touches.
+/// Guest RAM that is contiguous in the guest isn't contiguous in the host: every block is
+/// its own allocation, so a range crossing a 1GB boundary is two host slices.
+pub const GuestChunks = struct {
+    guest_state: *vmx.VMState,
+    gpa: GuestPhys,
+    left: usize,
+
+    pub fn next(self: *GuestChunks) ?[]u8 {
+        if (self.left == 0) return null;
+        const inner: usize = @intCast(self.gpa & (block_size - 1));
+        const n = @min(self.left, block_size - inner);
+        // the range was checked by `guestChunks`
+        const block = self.guest_state.guest_mem_pages[blockOf(self.guest_state, self.gpa).?];
+        self.gpa += n;
+        self.left -= n;
+        return block[inner..][0..n];
+    }
+};
+
+/// Iterates the host memory behind guest physical `gpa`..`gpa + len`, which must all be RAM.
+pub fn guestChunks(guest_state: *vmx.VMState, gpa: GuestPhys, len: usize) GuestMemError!GuestChunks {
+    try checkRam(guest_state, gpa, len);
+    return .{ .guest_state = guest_state, .gpa = gpa, .left = len };
+}
+
+/// Copies `dst.len` bytes of guest RAM at `gpa` into `dst`.
+/// Use it for anything the guest can change under you and that you check before using
+/// (descriptors, packet headers): validate the copy, never re-read guest memory.
+pub fn readGuestBytes(guest_state: *vmx.VMState, dst: []u8, gpa: GuestPhys) GuestMemError!void {
+    var chunks = try guestChunks(guest_state, gpa, dst.len);
+    var done: usize = 0;
+    while (chunks.next()) |chunk| {
+        @memcpy(dst[done..][0..chunk.len], chunk);
+        done += chunk.len;
+    }
+}
+
+/// A pointer to a `T` in guest RAM, for memory the guest shares with a device, like the
+/// `idx` fields of a virtqueue. `gpa` must be naturally aligned, which makes the pointer
+/// usable with @atomicLoad / @atomicStore. Natural alignment also keeps any `T` no larger
+/// than its alignment (u16, u32, u64) inside one block; a bigger `T` may cross one.
+pub fn guestPtr(comptime T: type, guest_state: *vmx.VMState, gpa: GuestPhys) GuestMemError!*T {
+    if (gpa % @alignOf(T) != 0) return error.Misaligned;
+    var chunks = try guestChunks(guest_state, gpa, @sizeOf(T));
+    const chunk = chunks.next().?;
+    if (chunk.len != @sizeOf(T)) return error.CrossesBlock;
+    return @ptrCast(@alignCast(chunk.ptr));
 }
 
 /// creates a basic page table and populates `guest_cr3` and `guest_pml4` fields of guest_state
@@ -514,28 +579,22 @@ pub fn invept(invept_type: InvEptType, eptp: EPTP) void {
 }
 
 /// copies a `T` out of guest-physical memory.
-/// handles unaligned addresses and values that straddle a page boundary.
-pub fn readGuestPhys(comptime T: type, guest_state: *vmx.VMState, gpa: GuestPhys) !T {
-    return readGuest(T, guest_state, gpa, null);
+/// handles unaligned addresses and values that straddle a block boundary.
+pub fn readGuestPhys(comptime T: type, guest_state: *vmx.VMState, gpa: GuestPhys) GuestMemError!T {
+    var val: T = undefined;
+    try readGuestBytes(guest_state, std.mem.asBytes(&val), gpa);
+    return val;
 }
 
 /// copies a `T` out of guest-virtual memory, walking the page tables at `guest_cr3`.
 /// handles unaligned addresses and values that straddle a page boundary.
 pub fn readGuestVirt(comptime T: type, guest_state: *vmx.VMState, guest_cr3: GuestPhys, gva: GuestVirt) !T {
-    return readGuest(T, guest_state, gva, guest_cr3);
-}
-
-/// `base_addr` is a `GuestVirt` when `cr3_if_virt` is set, and a `GuestPhys` otherwise.
-fn readGuest(comptime T: type, guest_state: *vmx.VMState, base_addr: u64, cr3_if_virt: ?GuestPhys) !T {
     var bytes: [@sizeOf(T)]u8 = undefined;
     var done: usize = 0;
     while (done < bytes.len) {
-        const addr = base_addr +% done;
+        const addr = gva +% done;
         const n = @min(bytes.len - done, 0x1000 - (addr & 0xfff));
-        const src: [*]const u8 = @ptrCast(if (cr3_if_virt) |cr3|
-            try guestVirtToHostVirt(guest_state, cr3, addr)
-        else
-            try guestPhysToHostVirt(guest_state, addr, false));
+        const src: [*]const u8 = @ptrCast(try guestVirtToHostVirt(guest_state, guest_cr3, addr));
         @memcpy(bytes[done..][0..n], src[0..n]);
         done += n;
     }
@@ -545,34 +604,18 @@ fn readGuest(comptime T: type, guest_state: *vmx.VMState, base_addr: u64, cr3_if
 /// loads an image into the guest mem at addr `base_addr`
 /// `base_addr` range is [0, total_mem_available]
 pub fn writeGuest(guest_state: *vmx.VMState, image: []const u8, base_addr: GuestPhys) error{OutOfMemory}!void {
-    if (!isRam(guest_state, base_addr, image.len))
-        return error.OutOfMemory;
-
+    var chunks = guestChunks(guest_state, base_addr, image.len) catch return error.OutOfMemory;
     var done: usize = 0;
-    while (done < image.len) {
-        const addr = base_addr +% done;
-        const addr_in_page = addr & ((1 << 30) - 1);
-        const n = @min(image.len - done, (1 << 30) - addr_in_page);
-        const page_idx = blockOf(guest_state, addr).?;
-        @memcpy(guest_state.guest_mem_pages[page_idx].*[addr_in_page .. addr_in_page + n], image[done .. done + n]);
-        done += n;
+    while (chunks.next()) |chunk| {
+        @memcpy(chunk, image[done..][0..chunk.len]);
+        done += chunk.len;
     }
 }
 
-/// FIXME: edgecases of OOB not properly tested
 /// `base_addr` range is [0, total_mem_available]
 pub fn memsetGuest(guest_state: *vmx.VMState, value: u8, base_addr: GuestPhys, len: usize) !void {
-    if (!isRam(guest_state, base_addr, len))
-        return error.OutOfMemory;
-    var done: usize = 0;
-    while (done < len) {
-        const addr = base_addr +% done;
-        const addr_in_page = addr & ((1 << 30) - 1);
-        const n = @min(len - done, (1 << 30) - addr_in_page);
-        const page_idx = blockOf(guest_state, addr).?;
-        @memset(guest_state.guest_mem_pages[page_idx].*[addr_in_page .. addr_in_page + n], value);
-        done += n;
-    }
+    var chunks = guestChunks(guest_state, base_addr, len) catch return error.OutOfMemory;
+    while (chunks.next()) |chunk| @memset(chunk, value);
 }
 
 /// Builds an x86-64 identity map page table for the guest, inside the guest RAM
