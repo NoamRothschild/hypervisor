@@ -141,7 +141,7 @@ pub const VMState = struct {
 
         self.serial = .{};
         self.pic = .init;
-        self.virtio_net = .init(.network, virtio_mmio.guest_mac);
+        self.virtio_net = .init(virtio_mmio.guest_mac, try mem_allocator.kalloc.create(virtio.Backlog));
         self.pending_irq = 0;
 
         self.cpus = try mem_allocator.kalloc.alloc(Vcpu, config.vcpu_count);

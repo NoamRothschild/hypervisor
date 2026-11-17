@@ -1,20 +1,22 @@
+//! virtio-net, the device side. the guest reaches it through `virtio_mmio.zig`.
+//! ref: virtio 1.2, section 5.1
 const std = @import("std");
 const debug = @import("../../debug.zig");
 const VMState = @import("../vmx.zig").VMState;
 const Vcpu = @import("../vcpu.zig").Vcpu;
 const virtio_mmio = @import("virtio_mmio.zig");
-const ept = @import("../ept.zig");
 const virtqueue = @import("virtqueue.zig");
-const Queue = @import("virtqueue.zig").Queue;
+const Queue = virtqueue.Queue;
+const responder = @import("responder.zig");
 
 pub const VirtioStatus = packed struct(u32) {
-    ack: bool = false, // (0x01)
-    driver: bool = false, // (0x02)
-    driver_ok: bool = false, // (0x04)
-    feat_ok: bool = false, // (0x08)
+    ack: bool = false, // 0x01
+    driver: bool = false, // 0x02
+    driver_ok: bool = false, // 0x04
+    feat_ok: bool = false, // 0x08
     rsvd: u2 = 0,
-    needs_reset: bool = false, // (0x40)
-    failed: bool = false, // (0x80)
+    needs_reset: bool = false, // 0x40
+    failed: bool = false, // 0x80
     rsvd1: u24 = 0,
 };
 
@@ -32,143 +34,18 @@ pub const DeviceID = enum(u32) {
     _,
 };
 
-/// feature bit 32, the device follows virtio 1.0 and later. required by `interface_version` 2.
+/// feature bit 32: the device follows virtio 1.0 and later. required by interface version 2
 pub const f_version_1: u64 = 1 << 32;
 /// VIRTIO_NET_F_MAC, feature bit 5: the device has a MAC address in its config space
 pub const f_net_mac: u64 = 1 << 5;
 
 /// InterruptStatus bit 0: the device put buffers in a used ring
 const int_used_buffer: u32 = 1 << 0;
-/// VIRTQ_AVAIL_F_NO_INTERRUPT, in the avail ring's `flags`: the driver doesn't want
-/// an interrupt when this queue gets used buffers
-const avail_f_no_interrupt: u16 = 1 << 0;
 
-/// the state of one virtio-mmio device, shared by every vcpu of the guest
-pub const NetDevice = struct {
-    device_id: DeviceID,
-    /// the MAC address in the config space, see `virtio_net_config`
-    mac: [6]u8,
-    status: VirtioStatus,
-    /// the features the device offers
-    device_features: u64,
-    /// the features the driver accepted
-    driver_features: u64,
-    /// which 32 bit half of the features `device_features`/`driver_features` access
-    device_features_sel: u32,
-    driver_features_sel: u32,
-    queues: [virtqueue.queue_count]Queue,
-    /// the queue the `queue_*` registers refer to
-    queue_sel: u32,
-    /// what InterruptStatus reads, the reasons for interrupts the driver hasn't acknowledged yet
-    interrupt_status: u32,
+/// 14-byte Ethernet header + 1500 MTU, no FCS
+pub const max_frame = 1514;
 
-    pub fn init(device_id: DeviceID, mac: [6]u8) NetDevice {
-        return .{
-            .device_id = device_id,
-            .mac = mac,
-            .status = .{},
-            .device_features = f_version_1 | f_net_mac,
-            .driver_features = 0,
-            .device_features_sel = 0,
-            .driver_features_sel = 0,
-            .queues = .{
-                Queue{},
-                Queue{},
-            },
-            .queue_sel = 0,
-            .interrupt_status = 0,
-        };
-    }
-
-    const rx_q = 0;
-    const tx_q = 1;
-
-    pub fn notify(self: *NetDevice, vcpu: *Vcpu, queue: u32) error{Aborted}!void {
-        switch (queue) {
-            rx_q => {},
-            tx_q => self.processTx(vcpu) catch |err| {
-                if (err == error.Aborted)
-                    return error.Aborted;
-                return vcpu.abortMsg("processTx failed with: {s}\n", .{@errorName(err)});
-            },
-            else => {},
-        }
-    }
-
-    fn processTx(self: *NetDevice, vcpu: *Vcpu) !void {
-        const q = &self.queues[tx_q];
-        if (!q.ready) return;
-
-        var any: bool = false;
-        var buf: [@sizeOf(NetHdr) + max_frame]u8 = undefined;
-        while (try q.pop(vcpu.vm)) |head| {
-            var n: usize = 0;
-            var c = q.chain(vcpu.vm, head);
-
-            while (try c.nextDesc()) |d| {
-                if (d.flags & virtqueue.DescEntry.f_write != 0)
-                    return vcpu.abortMsg("TX descriptor is device-writable", .{});
-                if (d.len > buf.len - n)
-                    return vcpu.abortMsg("TX frame too long", .{});
-
-                var guest_chunks = try ept.guestChunks(vcpu.vm, d.addr, d.len);
-                while (guest_chunks.next()) |ch| {
-                    @memcpy(buf[n..][0..ch.len], ch);
-                    n += ch.len;
-                }
-            }
-
-            try q.push(vcpu.vm, head, 0); // TX: the device wrote nothing
-            any = true;
-            if (n > @sizeOf(NetHdr))
-                self.transmit(buf[@sizeOf(NetHdr)..n]);
-        }
-        if (any)
-            self.interrupt(vcpu.vm, q);
-    }
-
-    pub fn transmit(_: *NetDevice, buf: []u8) void {
-        if (!debug.logging_enabled)
-            return;
-
-        std.log.info("TX pkt (len={d}): ", .{buf.len});
-        for (buf, 0..) |byte, i| {
-            debug.printf("{x:0>2}", .{byte});
-            if (i != buf.len - 1) {
-                debug.outb(debug.COM1, ':');
-                debug.outb(debug.COM1, ':');
-            } else debug.outb(debug.COM1, '\n');
-        }
-    }
-
-    /// Tells the driver `q` has new used buffers: sets the used buffer bit of
-    /// InterruptStatus and raises `irq`, unless the driver turned interrupts off for `q`.
-    /// call it once after pushing a batch of used buffers, not after every one.
-    pub fn interrupt(self: *NetDevice, vm: *VMState, q: *const Queue) void {
-        // the driver may ask for no interrupts (Linux does on TX while it is busy).
-        // it is only a hint, so an avail ring we can't read interrupts anyway.
-        const avail_flags = ept.readGuestPhys(u16, vm, q.avail_gpa) catch 0;
-        if (avail_flags & avail_f_no_interrupt != 0) return;
-        self.interrupt_status |= int_used_buffer;
-        // the virtual PIC injects it into the BSP once the guest unmasks it and IF is set
-        vm.pending_irq |= 1 << virtio_mmio.irq;
-        std.log.info("virtio-net irq: avail flags=0x{x} pic mask=0x{x} pending=0x{x}", .{ avail_flags, vm.pic.primary_mask, vm.pending_irq });
-    }
-
-    pub fn selectedQueue(self: *NetDevice) *Queue {
-        // checks for queue_sel setup must be enfored before.
-        // this code assumes the index is valid.
-        return &self.queues[self.queue_sel];
-    }
-
-    /// writing 0 to `status`
-    pub fn reset(self: *NetDevice) void {
-        self.* = .init(self.device_id, self.mac);
-    }
-};
-
-const max_frame = 1514; // 14-byte Ethernet header + 1500 MTU, no FCS
-
+/// what precedes every frame on both queues
 pub const NetHdr = extern struct {
     flags: u8 = 0, // NEEDS_CSUM = 1, DATA_VALID = 2
     gso_type: u8 = 0, // GSO_NONE = 0
@@ -176,9 +53,188 @@ pub const NetHdr = extern struct {
     gso_size: u16 = 0,
     csum_start: u16 = 0,
     csum_offset: u16 = 0,
-    num_buffers: u16 = 0, // RX: number of chains this packet used
+    /// RX: how many chains the packet used
+    num_buffers: u16 = 0,
 
     comptime {
         std.debug.assert(@sizeOf(NetHdr) == 12);
+    }
+};
+
+/// a frame with its `NetHdr`, the way it sits in a chain
+const Packet = [@sizeOf(NetHdr) + max_frame]u8;
+
+/// the state of the guest's virtio-net device, shared by all of its vcpus
+pub const NetDevice = struct {
+    pub const device_id: DeviceID = .network;
+    /// what the device offers, the driver accepts a subset in `driver_features`
+    pub const features: u64 = f_version_1 | f_net_mac;
+
+    const rx_q = 0;
+    const tx_q = 1;
+
+    /// the MAC address in the config space
+    mac: [6]u8,
+    status: VirtioStatus = .{},
+    driver_features: u64 = 0,
+    /// which 32-bit half of the features DeviceFeatures and DriverFeatures access
+    device_features_sel: u32 = 0,
+    driver_features_sel: u32 = 0,
+    queues: [virtqueue.queue_count]Queue = @splat(.{}),
+    /// the queue the Queue* registers access
+    queue_sel: u32 = 0,
+    /// InterruptStatus, the interrupts the driver hasn't acknowledged yet
+    interrupt_status: u32 = 0,
+    /// frames that arrived while the guest had no RX buffer posted.
+    /// on the heap: it is ~48KB and the kernel stack is 40KB
+    backlog: *Backlog,
+    /// frames dropped because the backlog was full
+    rx_dropped: u64 = 0,
+
+    /// empties `backlog`, it may hold garbage
+    pub fn init(mac: [6]u8, backlog: *Backlog) NetDevice {
+        backlog.clear();
+        return .{ .mac = mac, .backlog = backlog };
+    }
+
+    /// the driver wrote 0 to Status
+    pub fn reset(self: *NetDevice) void {
+        self.* = .init(self.mac, self.backlog);
+    }
+
+    /// the queue_sel write already checked it is in range
+    pub fn selected(self: *NetDevice) *Queue {
+        return &self.queues[self.queue_sel];
+    }
+
+    /// the driver wrote QueueNotify: `queue` has new buffers
+    pub fn notify(self: *NetDevice, vcpu: *Vcpu, queue: u32) error{Aborted}!void {
+        switch (queue) {
+            rx_q => self.flushBacklog(vcpu),
+            tx_q => self.processTx(vcpu) catch |err|
+                return vcpu.abortMsg("virtio-net TX: {s}\n", .{@errorName(err)}),
+            else => {},
+        }
+    }
+
+    /// sends every chain the guest queued for TX
+    fn processTx(self: *NetDevice, vcpu: *Vcpu) !void {
+        const q = &self.queues[tx_q];
+        if (!q.ready) return;
+
+        var buf: Packet = undefined;
+        var sent_any = false;
+        while (try q.pop(vcpu.vm)) |head| {
+            var chain = q.chain(vcpu.vm, head);
+            const pkt = try chain.read(&buf);
+            try q.push(vcpu.vm, head, 0); // the device wrote nothing
+            sent_any = true;
+            if (pkt.len > @sizeOf(NetHdr))
+                self.transmit(vcpu, pkt[@sizeOf(NetHdr)..]);
+        }
+        if (sent_any) self.interrupt(vcpu.vm, q);
+    }
+
+    /// a frame the guest sent. for now the built-in gateway answers it
+    fn transmit(self: *NetDevice, vcpu: *Vcpu, frame: []const u8) void {
+        logFrame("TX", frame);
+        var reply: [max_frame]u8 = undefined;
+        if (responder.respond(frame, &reply)) |n|
+            self.receive(vcpu, reply[0..n]);
+    }
+
+    /// hands a frame to the guest: into an RX buffer, or into the backlog if it
+    /// has none posted. drops it if the backlog is full too
+    pub fn receive(self: *NetDevice, vcpu: *Vcpu, frame: []const u8) void {
+        // only skip the backlog when it is empty, so frames stay in order
+        if (self.backlog.isEmpty() and self.deliver(vcpu, frame)) return;
+        if (!self.backlog.push(frame)) self.rx_dropped += 1;
+    }
+
+    /// delivers backlogged frames, oldest first, until the guest runs out of RX buffers
+    fn flushBacklog(self: *NetDevice, vcpu: *Vcpu) void {
+        while (self.backlog.peek()) |frame| {
+            if (!self.deliver(vcpu, frame)) return;
+            self.backlog.drop();
+        }
+    }
+
+    /// copies `frame` into the next RX chain. false if the guest has none posted
+    fn deliver(self: *NetDevice, vcpu: *Vcpu, frame: []const u8) bool {
+        const q = &self.queues[rx_q];
+        if (!q.ready or !self.status.driver_ok or frame.len > max_frame) return false;
+        const head = (q.pop(vcpu.vm) catch return false) orelse return false;
+
+        var buf: Packet = undefined;
+        const hdr: NetHdr = .{ .num_buffers = 1 };
+        @memcpy(buf[0..@sizeOf(NetHdr)], std.mem.asBytes(&hdr));
+        @memcpy(buf[@sizeOf(NetHdr)..][0..frame.len], frame);
+
+        var chain = q.chain(vcpu.vm, head);
+        const written = chain.write(buf[0 .. @sizeOf(NetHdr) + frame.len]);
+        // push it even if the packet didn't fit, or the driver loses the buffer
+        q.push(vcpu.vm, head, written) catch return false;
+        self.interrupt(vcpu.vm, q);
+        return true;
+    }
+
+    /// tells the driver `q` has used buffers, unless it turned interrupts off for `q`.
+    /// call it once per batch of pushes, not after every one
+    fn interrupt(self: *NetDevice, vm: *VMState, q: *const Queue) void {
+        if (!q.wantsInterrupt(vm)) return;
+        self.interrupt_status |= int_used_buffer;
+        // the virtual PIC injects it into the BSP once the guest unmasks it and sets IF
+        vm.pending_irq |= 1 << virtio_mmio.irq;
+    }
+};
+
+/// prints `frame` as hex bytes separated by `::`
+fn logFrame(comptime dir: []const u8, frame: []const u8) void {
+    if (!debug.logging_enabled) return;
+    std.log.info(dir ++ " pkt (len={d}):", .{frame.len});
+    for (frame, 0..) |byte, i|
+        debug.printf("{s}{x:0>2}", .{ if (i == 0) "" else "::", byte });
+    debug.printf("\n", .{});
+}
+
+/// a FIFO of frames waiting for the guest to post RX buffers
+pub const Backlog = struct {
+    pub const depth = 32;
+
+    frames: [depth][max_frame]u8,
+    lens: [depth]u16,
+    /// index of the oldest frame
+    head: usize,
+    len: usize,
+
+    pub fn clear(self: *Backlog) void {
+        self.head = 0;
+        self.len = 0;
+    }
+
+    fn isEmpty(self: *const Backlog) bool {
+        return self.len == 0;
+    }
+
+    /// copies `frame` in at the back. false if the backlog is full or the frame too long
+    fn push(self: *Backlog, frame: []const u8) bool {
+        if (self.len == depth or frame.len > max_frame) return false;
+        const i = (self.head + self.len) % depth;
+        @memcpy(self.frames[i][0..frame.len], frame);
+        self.lens[i] = @intCast(frame.len);
+        self.len += 1;
+        return true;
+    }
+
+    /// the oldest frame. it stays in the backlog until `drop`
+    fn peek(self: *const Backlog) ?[]const u8 {
+        if (self.len == 0) return null;
+        return self.frames[self.head][0..self.lens[self.head]];
+    }
+
+    /// removes the oldest frame
+    fn drop(self: *Backlog) void {
+        self.head = (self.head + 1) % depth;
+        self.len -= 1;
     }
 };
