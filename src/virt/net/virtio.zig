@@ -8,6 +8,7 @@ const virtio_mmio = @import("virtio_mmio.zig");
 const virtqueue = @import("virtqueue.zig");
 const Queue = virtqueue.Queue;
 const responder = @import("responder.zig");
+const ethernet = @import("ethernet.zig");
 
 pub const VirtioStatus = packed struct(u32) {
     ack: bool = false, // 0x01
@@ -188,13 +189,57 @@ pub const NetDevice = struct {
     }
 };
 
-/// prints `frame` as hex bytes separated by `::`
+/// prints what `frame` is (e.g. `ARP request 10.0.2.15 -> 10.0.2.2`), then its
+/// bytes in hex separated by `::`
 fn logFrame(comptime dir: []const u8, frame: []const u8) void {
     if (!debug.logging_enabled) return;
     std.log.info(dir ++ " pkt (len={d}):", .{frame.len});
+    describeFrame(frame);
     for (frame, 0..) |byte, i|
         debug.printf("{s}{x:0>2}", .{ if (i == 0) "" else "::", byte });
     debug.printf("\n", .{});
+}
+
+/// one line: the protocols in `frame` and their addresses or ports
+fn describeFrame(frame: []const u8) void {
+    if (frame.len < ethernet.header_len) return debug.printf("runt frame\n", .{});
+    const f: *const ethernet.Frame = @ptrCast(frame.ptr);
+    switch (f.ethertype.get()) {
+        .arp => {
+            if (!ethernet.fits(frame, ethernet.Arp)) return debug.printf("ARP, truncated\n", .{});
+            const arp = &f.payload.arp;
+            debug.printf("ARP {s} {f} -> {f}\n", .{ tagName(arp.oper.get()), fmtIp(arp.spa), fmtIp(arp.tpa) });
+        },
+        .ipv4 => {
+            if (!ethernet.fits(frame, ethernet.Ipv4)) return debug.printf("IPv4, truncated\n", .{});
+            const ip = &f.payload.ipv4;
+            debug.printf("IPv4 {f} -> {f} {s}", .{ fmtIp(ip.src), fmtIp(ip.dst), tagName(ip.proto) });
+            switch (ip.proto) {
+                .icmp => if (ethernet.fitsL4(frame, ethernet.Icmp))
+                    debug.printf(" {s}", .{tagName(ip.l4().icmp.type)}),
+                .udp => if (ethernet.fitsL4(frame, ethernet.Udp))
+                    debug.printf(" {d} -> {d}", .{ ip.l4().udp.src_port.get(), ip.l4().udp.dst_port.get() }),
+                .tcp => if (ethernet.fitsL4(frame, ethernet.Tcp))
+                    debug.printf(" {d} -> {d}", .{ ip.l4().tcp.src_port.get(), ip.l4().tcp.dst_port.get() }),
+                _ => {},
+            }
+            debug.printf("\n", .{});
+        },
+        else => |t| debug.printf("ethertype {s} (0x{x:0>4})\n", .{ tagName(t), @intFromEnum(t) }),
+    }
+}
+
+/// the name of `e`, or "?" for a value the enum doesn't name
+fn tagName(e: anytype) []const u8 {
+    return std.enums.tagName(@TypeOf(e), e) orelse "?";
+}
+
+fn fmtIp(ip: ethernet.Ip) std.fmt.Alt(ethernet.Ip, formatIp) {
+    return .{ .data = ip };
+}
+
+fn formatIp(ip: ethernet.Ip, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    try w.print("{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] });
 }
 
 /// a FIFO of frames waiting for the guest to post RX buffers
